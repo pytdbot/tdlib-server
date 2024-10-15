@@ -14,7 +14,7 @@ const MINIMUM_TDLIB_VERSION = "1.8.6"
 var TDLIB_VERSION string
 
 func init() {
-	res_version := utils.UnsafeUnmarshal(tdjson.NewTdJson(false, 0).Execute(utils.UnsafeMarshal(
+	res_version := utils.UnsafeUnmarshal(tdjson.NewTdJson(false, 0, "").Execute(utils.UnsafeMarshal(
 		utils.MakeObject(
 			"getOption",
 			utils.Params{
