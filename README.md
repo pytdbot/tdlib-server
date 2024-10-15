@@ -58,7 +58,7 @@ Follow these steps to set up and build **TDLib Server** on your system.
 ### Requirements
 - **Go >= 1.21**
 - **[TDLib](https://github.com/tdlib/td#building)**
-- **[RabbitMQ](https://www.rabbitmq.com/download.html)**
+- **[RabbitMQ](https://www.rabbitmq.com/docs/download)**
 
 Once TDLib and RabbitMQ are installed, you're ready to build **TDLib Server**:
 
