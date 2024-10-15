@@ -51,7 +51,7 @@ type Server struct {
 // New creates and initializes a new Server instance with the specified verbosity level
 // and configuration file path. It returns a pointer to the Server and an error if the
 // initialization fails.
-func New(td_verbosity_level int, config_path string, debug bool) (*Server, error) {
+func New(td_verbosity_level int, config_path string, log_file string, debug bool) (*Server, error) {
 	cfg, err := ini.Load(config_path)
 
 	if err != nil {
@@ -77,7 +77,7 @@ func New(td_verbosity_level int, config_path string, debug bool) (*Server, error
 		utils.PanicOnErr(false, "Could not convert bot ID to int", nil, true)
 	}
 
-	td := tdjson.NewTdJson(true, td_verbosity_level)
+	td := tdjson.NewTdJson(true, td_verbosity_level, log_file)
 
 	tdRequestsInitValue := utils.UnsafeUnmarshal(td.Execute(utils.UnsafeMarshal(
 		utils.MakeObject(

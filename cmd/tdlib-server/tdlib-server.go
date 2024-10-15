@@ -56,6 +56,12 @@ func createCLIApp() *cli.App {
 				Value:    2,
 				Usage:    "TDLib verbosity `level`",
 			},
+			&cli.StringFlag{
+				Category: "Logging",
+				Name:     "log-file",
+				Value:    "",
+				Usage:    "Path to log `file` for TDLib logs",
+			},
 			&cli.BoolFlag{
 				Category:    "Logging",
 				Name:        "enable-requests-debug",
@@ -68,7 +74,7 @@ func createCLIApp() *cli.App {
 }
 
 func runServer(c *cli.Context) error {
-	server, err := srv.New(c.Int("td-verbosity-level"), c.String("config"), c.IsSet("enable-requests-debug"))
+	server, err := srv.New(c.Int("td-verbosity-level"), c.String("config"), c.String("log-file"), c.IsSet("enable-requests-debug"))
 	if err != nil {
 		return err
 	}

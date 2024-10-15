@@ -12,11 +12,26 @@ type TdJson struct {
 }
 
 // New initializes a new TdJson instance and sets the log verbosity level.
-func NewTdJson(create_client bool, verbosity int) *TdJson {
+func NewTdJson(create_client bool, verbosity int, log_file string) *TdJson {
 	instance := TdJson{}
 
 	if create_client {
 		instance.ClientID = C.td_create_client_id()
+		if log_file != "" {
+			instance.Execute(utils.UnsafeMarshal(
+				utils.MakeObject(
+					"setLogStream",
+					utils.Params{
+						"log_stream": utils.MakeObject("logStreamFile", utils.Params{
+							"path":            log_file,
+							"max_file_size":   104857600, // 100MB
+							"redirect_stderr": false,
+						}),
+					},
+				),
+			))
+		}
+
 		instance.Execute(utils.UnsafeMarshal(
 			utils.MakeObject(
 				"setLogVerbosityLevel",
