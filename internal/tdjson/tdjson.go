@@ -16,7 +16,6 @@ func NewTdJson(create_client bool, verbosity int, log_file string) *TdJson {
 	instance := TdJson{}
 
 	if create_client {
-		instance.ClientID = C.td_create_client_id()
 		if log_file != "" {
 			instance.Execute(utils.UnsafeMarshal(
 				utils.MakeObject(
@@ -40,6 +39,8 @@ func NewTdJson(create_client bool, verbosity int, log_file string) *TdJson {
 				},
 			),
 		))
+
+		instance.ClientID = C.td_create_client_id()
 	}
 
 	return &instance
