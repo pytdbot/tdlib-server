@@ -1,29 +1,56 @@
-.PHONY: build clean install
 .DEFAULT_GOAL := build
 
-EXECUTABLE := $(shell pwd)/bin/tdlib-server
+BIN := $(shell pwd)/bin/tdlib-server
 SRC := ./cmd/tdlib-server/tdlib-server.go
-INSTALL_DIR := /usr/local/bin
-LINK := $(INSTALL_DIR)/tdlib-server
+BIN_PREFIX ?= /usr/local/bin
+SYMLINK := $(BIN_PREFIX)/tdlib-server
 
-build:
-	go build -o $(EXECUTABLE) $(SRC)
-	@echo "\ntdlib-server installed at $(EXECUTABLE)"
+TDLIB_DIR ?= /usr/local
+TD_INC ?= $(TDLIB_DIR)/include
+TD_LIB ?= $(TDLIB_DIR)/lib
 
-build-wide:
-	CGO_CFLAGS=-I/usr/local/include CGO_LDFLAGS="-Wl,-rpath=/usr/local/lib -ltdjson" go build -o $(EXECUTABLE) $(SRC)
-	@echo "\ntdlib-server installed at $(EXECUTABLE)"
+.PHONY: build
+build: check_tdlib
+	CGO_LDFLAGS="-L$(TD_LIB) -Wl,-rpath=$(TD_LIB) -ltdjson" \
+	CGO_CFLAGS=-I$(TD_INC) \
+	go build -o $(BIN) $(SRC)
+	@echo "\ntdlib-server installed at $(BIN)"
 
+.PHONY: clean
 clean:
 	rm -rf ./bin
 
+.PHONY: install
 install:
-	ln -sf $(PWD)/$(EXECUTABLE) $(LINK)
-	@echo "\ntdlib-server installed at $(LINK)"
+	ln -sf $(BIN) $(SYMLINK)
+	@echo "\ntdlib-server installed at $(SYMLINK)"
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(SYMLINK)
+	@echo "\ntdlib-server uninstalled from $(SYMLINK)"
+
+.PHONY: check_tdlib
+check_tdlib:
+	@if [ ! -d "$(TD_INC)" ]; then \
+		echo "Error: TDLib include directory not found at $(TD_INC)."; \
+		echo "Please ensure that TDLIB_DIR environment variable is set correctly."; \
+		echo "Alternatively, you can set the TD_INC environment variable manually for include directory."; \
+		exit 1; \
+	fi
+
+	@if [ ! -d "$(TD_LIB)" ]; then \
+		echo "Error: TDLib library directory not found at $(TD_LIB)."; \
+		echo "Please ensure that TDLIB_DIR environment variable is set correctly."; \
+		echo "Alternatively, you can set the TD_LIB environment variable manually for library directory."; \
+		exit 1; \
+	fi
+
+.PHONY: help
 help:
 	@echo "Available commands:"
-	@echo "  make build    - Build the tdlib-server binary"
-	@echo "  make clean    - Remove the built binary and clean up"
-	@echo "  make install  - Install tdlib-server system-wide"
-	@echo "  make help     - Display this help message"
+	@echo "  make build     - Build the tdlib-server binary"
+	@echo "  make clean     - Remove the built binary and clean up"
+	@echo "  make install   - Install tdlib-server system-wide"
+	@echo "  make uninstall - Uninstall tdlib-server system-wide"
+	@echo "  make help      - Display this help message"
