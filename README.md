@@ -71,14 +71,14 @@ Once TDLib and RabbitMQ are installed, you're ready to build **TDLib Server**:
 - Build TDLib Server
     - If **TDLib is not installed system-wide** (a.k.a ``/usr/local``):
         ```bash
-        CGO_CFLAGS=-I/path/to/include CGO_LDFLAGS="-Wl,-rpath=/path/to/lib -ltdjson" make build
+        TDLIB_DIR="/path/to/tdlib" make build
         ```
         Ensure you adjust the paths to match your installation directories.
         By default TDLib install files at ``td/tdlib``
 
-    - If **TDLib is installed system-wide** (recommended):
+    - If **TDLib is installed system-wide** (recommended), just do:
         ```bash
-        make build-wide
+        make build
         ```
 
     - Optionally, you can install ``tdlib-server`` system-wide:
