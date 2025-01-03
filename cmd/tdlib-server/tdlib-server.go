@@ -38,7 +38,7 @@ func createCLIApp() *cli.App {
 		Authors: []*cli.Author{
 			{Name: "AYMEN ~ https://github.com/AYMENJD"},
 		},
-		Copyright:            "Copyright (c) 2024 Pytdbot, AYMENJD",
+		Copyright:            "Copyright (c) 2024-2025 Pytdbot, AYMENJD",
 		Version:              srv.Version,
 		EnableBashCompletion: true,
 		Flags: []cli.Flag{
