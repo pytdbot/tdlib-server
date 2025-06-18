@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"gopkg.in/ini.v1"
@@ -46,6 +48,10 @@ type Server struct {
 
 	results         *utils.SafeResultsMap
 	broadcast_types map[string]struct{}
+
+	updates_count  atomic.Int64
+	requests_count atomic.Int64
+	uptime         time.Time
 }
 
 // New creates and initializes a new Server instance with the specified verbosity level
@@ -133,6 +139,8 @@ func (srv *Server) Start() {
 
 	srv.startRabbitMQ()
 
+	srv.uptime = time.Now()
+
 	go srv.Invoke(utils.MakeObject("getOption", utils.Params{"name": "version"}))
 	go srv.tdListener()
 }
@@ -187,6 +195,8 @@ func (srv *Server) processUpdate(update Data) {
 	}
 
 	if extra, exists := update["@extra"]; exists { // it's a response
+		srv.requests_count.Add(1)
+
 		extraMap := utils.AsMap(extra)
 
 		if routingKey, exists := extraMap["routing_key"]; exists {
@@ -201,6 +211,8 @@ func (srv *Server) processUpdate(update Data) {
 			}
 		}
 	} else { // it's an update
+		srv.updates_count.Add(1)
+
 		update_type := utils.Type(update)
 
 		switch update_type {
@@ -249,6 +261,11 @@ func (srv *Server) processRequest(r amqp.Delivery) {
 		state["@extra"] = extra
 		state["@client_id"] = srv.td.ClientID
 		srv.sendResponse(r.ReplyTo, state)
+	case "getserverstats":
+		stats := srv.getStats()
+		stats["@extra"] = extra
+		stats["@client_id"] = srv.td.ClientID
+		srv.sendResponse(r.ReplyTo, stats)
 	default:
 		extra["routing_key"] = r.ReplyTo
 		srv.send(request)
@@ -276,6 +293,18 @@ func (srv *Server) getCurrentState() Data {
 
 	updates["updates"] = append(updates["updates"].([]Data), srv.connectionState)
 	return updates
+}
+
+func (srv *Server) getStats() Data {
+	return Data{
+		"@type": "text",
+		"text": utils.UnsafeMarshal(Data{
+			"my_id":          srv.myIDInt,
+			"uptime":         time.Since(srv.uptime).Seconds(),
+			"updates_count":  srv.updates_count.Load(),
+			"requests_count": srv.requests_count.Load(),
+		}),
+	}
 }
 
 func (srv *Server) getFakeUpdateAuthClosing() Data {
