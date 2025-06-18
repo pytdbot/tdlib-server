@@ -1,0 +1,42 @@
+name: Build TDLib server
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-draft:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Build static
+      run: |
+        mkdir -p release-assets
+
+        docker run --rm -v "$PWD:/work" -w /work quay.io/pypa/manylinux2014_x86_64 \
+          bash -c '
+          curl -s https://raw.githubusercontent.com/AYMENJD/tdjson/refs/heads/main/.github/workflows/before-all.sh | bash
+
+          curl -OL https://go.dev/dl/go1.21.0.linux-amd64.tar.gz
+          tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz
+          rm -f go1.21.0.linux-amd64.tar.gz
+          export PATH=$PATH:/usr/local/go/bin
+
+          make static
+          mkdir -p release-assets
+          mv bin/tdlib-server release-assets/tdlib-server-linux-amd64
+          chmod +x release-assets/tdlib-server-linux-amd64
+          '
+
+    - name: Check build
+      run: |
+        ls -lh release-assets/
+        ldd release-assets/tdlib-server-linux-amd64
+
+    - name: Create draft release
+      uses: softprops/action-gh-release@v1
+      with:
+        draft: true
+        files: release-assets/tdlib-server-linux-amd64
+        name: Release TDLib server
