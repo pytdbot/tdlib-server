@@ -24,7 +24,6 @@ jobs:
           export PATH=$PATH:/usr/local/go/bin
 
           make static
-          mkdir -p release-assets
           mv bin/tdlib-server release-assets/tdlib-server-linux-amd64
           chmod +x release-assets/tdlib-server-linux-amd64
           '
