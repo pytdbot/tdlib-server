@@ -16,6 +16,11 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Version
+      id: version
+      run: |
+        echo "VERSION=$(sed -n 's/const Version = "\([^"]*\)"/\1/p' internal/server/version.go)" >> $GITHUB_OUTPUT
+
     - name: Build static
       run: |
         mkdir -p release-assets
@@ -30,6 +35,7 @@ jobs:
           export PATH=$PATH:/usr/local/go/bin
 
           make static
+
           mv bin/tdlib-server release-assets/tdlib-server-linux-amd64
           chmod +x release-assets/tdlib-server-linux-amd64
           '
@@ -43,5 +49,6 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         draft: true
+        name: TDLib Server v${{ steps.version.outputs.VERSION }}
+        tag_name: v${{ steps.version.outputs.VERSION }}
         files: release-assets/tdlib-server-linux-amd64
-        name: Release TDLib server
