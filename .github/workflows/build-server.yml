@@ -48,7 +48,8 @@ jobs:
     - name: Create draft release
       uses: softprops/action-gh-release@v1
       with:
-        draft: true
+        draft: false
         name: TDLib Server v${{ steps.version.outputs.VERSION }}
         tag_name: v${{ steps.version.outputs.VERSION }}
         files: release-assets/tdlib-server-linux-amd64
+        token: ${{ secrets.GIT_ACCESS_TOKEN }}
