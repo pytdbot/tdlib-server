@@ -1,6 +1,12 @@
 name: Build TDLib server
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "main"
+
+    paths:
+      - "internal/server/version.go"
 
 jobs:
   build-and-draft:
