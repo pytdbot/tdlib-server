@@ -44,6 +44,14 @@ func Unmarshal(input string) (map[string]interface{}, error) {
 	return result, nil
 }
 
+// UnmarshalWithTarget decodes the input JSON string into the target struct.
+// The target must be a pointer to a struct.
+//
+// If an error occurs during decoding, it returns the error.
+func UnmarshalWithTarget(input []byte, target interface{}) error {
+	return json.Unmarshal(input, target)
+}
+
 // UnsafeMarshal encodes the provided map[string]interface{} input into a JSON string.
 //
 // If an error occurs during encoding, it prints the error and returns an empty string.
