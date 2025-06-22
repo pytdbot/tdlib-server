@@ -45,7 +45,7 @@ jobs:
         ls -lh release-assets/
         ldd release-assets/tdlib-server-linux-amd64
 
-    - name: Create draft release
+    - name: Create release
       uses: softprops/action-gh-release@v1
       with:
         draft: false
