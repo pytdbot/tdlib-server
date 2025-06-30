@@ -12,14 +12,21 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-co-op/gocron/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
+
 	"gopkg.in/ini.v1"
 
 	"github.com/pytdbot/tdlib-server/internal/tdjson"
 	"github.com/pytdbot/tdlib-server/internal/utils"
 )
 
-type Data map[string]interface{}
+type Data = map[string]interface{}
+
+type ScheduledEvent struct {
+	event gocron.Job
+	data  Data
+}
 
 type Server struct {
 	config    *ini.File
@@ -45,6 +52,10 @@ type Server struct {
 
 	updatesQueue  *amqp.Queue
 	requestsQueue *amqp.Queue
+
+	scheduler gocron.Scheduler
+	events    map[string]ScheduledEvent
+	eventsMu  sync.Mutex
 
 	results         *utils.SafeResultsMap
 	broadcast_types map[string]struct{}
@@ -106,6 +117,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		tdRequestsInitValue: tdRequestsInitValue["verbosity_level"].(int64),
 		waitForClosed:       make(chan bool),
 		broadcast_types:     mapOfTypes,
+		events:              make(map[string]ScheduledEvent),
 	}, nil
 }
 
@@ -129,6 +141,7 @@ func (srv *Server) Close() (bool, error) {
 		srv.mqChannel.Close()
 		srv.mqConnection.Close()
 
+		srv.scheduler.Shutdown()
 		return true, nil
 	}
 
@@ -140,6 +153,12 @@ func (srv *Server) Start() {
 	srv.startRabbitMQ()
 
 	srv.uptime = time.Now()
+	scheduler, err := gocron.NewScheduler()
+	if err != nil {
+		utils.PanicOnErr(false, "Could not create scheduler: %v", err, true)
+	}
+	srv.scheduler = scheduler
+	srv.scheduler.Start()
 
 	go srv.Invoke(utils.MakeObject("getOption", utils.Params{"name": "version"}))
 	go srv.tdListener()
@@ -253,19 +272,13 @@ func (srv *Server) processRequest(r amqp.Delivery) {
 
 	switch strings.ToLower(utils.Type(request)) {
 	case "close": // ignore close requests and send fake authorizationStateClosing and authorizationStateClosed
-		srv.sendResponse(r.ReplyTo, utils.MakeObject("ok", utils.Params{"@client_id": srv.td.ClientID, "@extra": extra}))
-		srv.sendResponse(r.ReplyTo, srv.getFakeUpdateAuthClosing())
-		srv.sendResponse(r.ReplyTo, srv.getFakeUpdateAuthClosed())
+		srv.handleCloseRequest(r, extra)
 	case "getcurrentstate":
-		state := srv.getCurrentState()
-		state["@extra"] = extra
-		state["@client_id"] = srv.td.ClientID
-		srv.sendResponse(r.ReplyTo, state)
+		srv.handleGetCurrentStateRequest(r, extra)
 	case "getserverstats":
-		stats := srv.getStats()
-		stats["@extra"] = extra
-		stats["@client_id"] = srv.td.ClientID
-		srv.sendResponse(r.ReplyTo, stats)
+		srv.handleGetServerStatsRequest(r, extra)
+	case "scheduleevent":
+		srv.handleScheduleEventRequest(r, request, extra)
 	default:
 		extra["routing_key"] = r.ReplyTo
 		srv.send(request)
@@ -273,9 +286,97 @@ func (srv *Server) processRequest(r amqp.Delivery) {
 
 }
 
+func (srv *Server) handleCloseRequest(r amqp.Delivery, extra Data) {
+	srv.sendResponse(r.ReplyTo, utils.MakeObject("ok", utils.Params{"@client_id": srv.td.ClientID, "@extra": extra}))
+	srv.sendResponse(r.ReplyTo, srv.getFakeUpdateAuthClosing())
+	srv.sendResponse(r.ReplyTo, srv.getFakeUpdateAuthClosed())
+}
+
+func (srv *Server) handleGetCurrentStateRequest(r amqp.Delivery, extra Data) {
+	state := srv.getCurrentState()
+	state["@extra"] = extra
+	state["@client_id"] = srv.td.ClientID
+	srv.sendResponse(r.ReplyTo, state)
+}
+
+func (srv *Server) handleGetServerStatsRequest(r amqp.Delivery, extra Data) {
+	stats := srv.getStats()
+	stats["@extra"] = extra
+	stats["@client_id"] = srv.td.ClientID
+	srv.sendResponse(r.ReplyTo, stats)
+}
+
+func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, extra Data) {
+	sendAtValue, ok := request["send_at"]
+	if !ok {
+		srv.sendError(r.ReplyTo, 400, "send_at is required", extra)
+		return
+	}
+
+	var sendAt int64
+	switch v := sendAtValue.(type) {
+	case int64:
+		sendAt = v
+	case float64:
+		sendAt = int64(v)
+	case int:
+		sendAt = int64(v)
+	default:
+		srv.sendError(r.ReplyTo, 400, "send_at must be a number", extra)
+		return
+	}
+
+	if sendAt < time.Now().Unix() {
+		srv.sendError(r.ReplyTo, 400, "send_at must be in the future", extra)
+		return
+	}
+
+	srv.eventsMu.Lock()
+	defer srv.eventsMu.Unlock()
+
+	var event ScheduledEvent
+	if data, exists := request["data"]; exists {
+		event.data = data.(Data)
+	}
+
+	e, err := srv.scheduler.NewJob(
+		gocron.OneTimeJob(gocron.OneTimeJobStartDateTime(time.Unix(sendAt, 0))),
+		gocron.NewTask(func() {
+			srv.sendScheduledEvent(r.ReplyTo, event)
+		}),
+	)
+	if err != nil {
+		srv.sendError(r.ReplyTo, 500, "Could not create scheduled event: "+err.Error(), extra)
+		return
+	}
+
+	event.event = e
+	srv.events[event.event.ID().String()] = event
+
+	srv.sendResponse(r.ReplyTo, Data{
+		"@type":      "scheduledEvent",
+		"event_id":   event.event.ID().String(),
+		"send_at":    sendAt,
+		"@extra":     extra,
+		"@client_id": srv.td.ClientID,
+	})
+}
+
+func (srv *Server) sendScheduledEvent(routing_key string, event ScheduledEvent) {
+	srv.eventsMu.Lock()
+	defer srv.eventsMu.Unlock()
+	srv.sendUpdate(Data{
+		"@type":      "updateScheduledEvent",
+		"event_id":   event.event.ID().String(),
+		"data":       event.data,
+		"@client_id": srv.td.ClientID,
+	})
+	delete(srv.events, event.event.ID().String())
+}
+
 func (srv *Server) getCurrentState() Data {
 	updates := Data{
-		"@type":   "Updates",
+		"@type":   "updates",
 		"updates": make([]Data, 0, len(srv.options)+2), // 2+ -> authorizationState + connectionState
 	}
 
@@ -297,13 +398,11 @@ func (srv *Server) getCurrentState() Data {
 
 func (srv *Server) getStats() Data {
 	return Data{
-		"@type": "text",
-		"text": utils.UnsafeMarshal(Data{
-			"my_id":          srv.myIDInt,
-			"uptime":         time.Since(srv.uptime).Seconds(),
-			"updates_count":  srv.updates_count.Load(),
-			"requests_count": srv.requests_count.Load(),
-		}),
+		"@type":          "serverStats",
+		"my_id":          srv.myIDInt,
+		"uptime":         time.Since(srv.uptime).Seconds(),
+		"updates_count":  srv.updates_count.Load(),
+		"requests_count": srv.requests_count.Load(),
 	}
 }
 
@@ -558,6 +657,16 @@ func (srv *Server) requestsListener() {
 	for request := range requests {
 		go srv.processRequest(request)
 	}
+}
+
+func (srv *Server) sendError(routing_key string, code int, message string, extra Data) {
+	srv.sendResponse(routing_key, Data{
+		"@type":      "error",
+		"code":       code,
+		"message":    message,
+		"@extra":     extra,
+		"@client_id": srv.td.ClientID,
+	})
 }
 
 func (srv *Server) sendResponse(routing_key string, update Data) {
