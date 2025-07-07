@@ -12,7 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-co-op/gocron/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"gopkg.in/ini.v1"
@@ -22,11 +21,6 @@ import (
 )
 
 type Data = map[string]interface{}
-
-type ScheduledEvent struct {
-	job  gocron.Job
-	data Data
-}
 
 type Server struct {
 	config    *ini.File
@@ -53,9 +47,7 @@ type Server struct {
 	updatesQueue  *amqp.Queue
 	requestsQueue *amqp.Queue
 
-	scheduler gocron.Scheduler
-	events    map[string]ScheduledEvent
-	eventsMu  sync.Mutex
+	scheduler *utils.Scheduler
 
 	results         *utils.SafeResultsMap
 	broadcast_types map[string]struct{}
@@ -106,10 +98,11 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 	)))
 
 	return &Server{
-		config:              cfg,
-		td:                  td,
-		requestID:           utils.NewIdGenerator(),
-		results:             utils.NewSafeResultsMap(),
+		config:    cfg,
+		td:        td,
+		requestID: utils.NewIdGenerator(),
+		results:   utils.NewSafeResultsMap(),
+
 		options:             make(Data),
 		myID:                myID,
 		myIDInt:             int64(myIDInt),
@@ -117,7 +110,6 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		tdRequestsInitValue: tdRequestsInitValue["verbosity_level"].(int64),
 		waitForClosed:       make(chan bool),
 		broadcast_types:     mapOfTypes,
-		events:              make(map[string]ScheduledEvent),
 	}, nil
 }
 
@@ -141,7 +133,7 @@ func (srv *Server) Close() (bool, error) {
 		srv.mqChannel.Close()
 		srv.mqConnection.Close()
 
-		srv.scheduler.Shutdown()
+		srv.scheduler.Close()
 		return true, nil
 	}
 
@@ -153,11 +145,9 @@ func (srv *Server) Start() {
 	srv.startRabbitMQ()
 
 	srv.uptime = time.Now()
-	scheduler, err := gocron.NewScheduler()
-	if err != nil {
-		utils.PanicOnErr(false, "Could not create scheduler: %v", err, true)
-	}
-	srv.scheduler = scheduler
+	srv.scheduler = utils.NewScheduler(filepath.Join(
+		srv.config.Section("server").Key("files_directory").String(), "database",
+	), srv.sendScheduledEvent)
 	srv.scheduler.Start()
 
 	go srv.Invoke(utils.MakeObject("getOption", utils.Params{"name": "version"}))
@@ -333,33 +323,21 @@ func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, ext
 		return
 	}
 
-	var event ScheduledEvent
-	if d, exists := request["data"]; exists {
-		if data, ok := d.(Data); ok {
-			event.data = data
-		} else {
-			srv.sendError(r.ReplyTo, 400, "data must be an object", extra)
+	var payload string
+	if p, exists := request["payload"]; exists {
+		var ok bool
+		payload, ok = p.(string)
+		if !ok {
+			srv.sendError(r.ReplyTo, 400, "payload must be a string", extra)
 			return
 		}
 	}
 
-	job, err := srv.scheduler.NewJob(
-		gocron.OneTimeJob(gocron.OneTimeJobStartDateTime(time.Unix(sendAt, 0))),
-		gocron.NewTask(func() {
-			srv.sendScheduledEvent(r.ReplyTo, event)
-		}),
-	)
+	eventID, err := srv.scheduler.CreateEvent(sendAt, payload)
 	if err != nil {
 		srv.sendError(r.ReplyTo, 500, "Could not create scheduled event: "+err.Error(), extra)
 		return
 	}
-
-	event.job = job
-	eventID := job.ID().String()
-
-	srv.eventsMu.Lock()
-	srv.events[eventID] = event
-	srv.eventsMu.Unlock()
 
 	srv.sendResponse(r.ReplyTo, utils.MakeObject("scheduledEvent", utils.Params{
 		"event_id":   eventID,
@@ -370,43 +348,44 @@ func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, ext
 }
 
 func (srv *Server) handleCancelScheduledEventRequest(r amqp.Delivery, request Data, extra Data) {
-	eventID, ok := request["event_id"].(string)
+	rawID, ok := request["event_id"]
 	if !ok {
-		srv.sendError(r.ReplyTo, 400, "event_id must be a string", extra)
+		srv.sendError(r.ReplyTo, 400, "event_id is required", extra)
 		return
 	}
 
-	srv.eventsMu.Lock()
-	defer srv.eventsMu.Unlock()
-
-	event, exists := srv.events[eventID]
-	if !exists {
-		srv.sendError(r.ReplyTo, 404, "Event not found", extra)
+	var eventID int64
+	switch v := rawID.(type) {
+	case float64:
+		eventID = int64(v)
+	case int:
+		eventID = int64(v)
+	case int64:
+		eventID = v
+	default:
+		srv.sendError(r.ReplyTo, 400, "event_id must be an integer", extra)
 		return
 	}
 
-	if err := srv.scheduler.RemoveJob(event.job.ID()); err != nil {
-		srv.sendError(r.ReplyTo, 500, "Failed to cancel event: "+err.Error(), extra)
+	code := srv.scheduler.CancelEvent(eventID)
+	if code == 0 {
+		srv.sendError(r.ReplyTo, 400, "Event not found", extra)
 		return
 	}
-
-	delete(srv.events, eventID)
+	if code < 0 {
+		srv.sendError(r.ReplyTo, 500, "Failed to cancel event", extra)
+	}
 
 	srv.sendResponse(r.ReplyTo, utils.MakeObject("ok", utils.Params{"@extra": extra, "@client_id": srv.td.ClientID}))
 }
 
-func (srv *Server) sendScheduledEvent(routing_key string, event ScheduledEvent) {
-	jobID := event.job.ID().String()
+func (srv *Server) sendScheduledEvent(event_id int64, payload string) {
 
 	srv.sendUpdate(utils.MakeObject("updateScheduledEvent", utils.Params{
-		"event_id":   jobID,
-		"data":       event.data,
+		"event_id":   event_id,
+		"payload":    payload,
 		"@client_id": srv.td.ClientID,
 	}))
-
-	srv.eventsMu.Lock()
-	defer srv.eventsMu.Unlock()
-	delete(srv.events, jobID)
 }
 
 func (srv *Server) getCurrentState() Data {
