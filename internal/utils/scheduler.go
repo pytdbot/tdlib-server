@@ -2,6 +2,7 @@ package utils
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"sync"
 	"time"
@@ -47,6 +48,9 @@ func (sched *Scheduler) CreateEvent(sendAt int64, payload string) (int64, error)
 	sched.mu.Lock()
 	defer sched.mu.Unlock()
 
+	if len(payload) > 4096 {
+		return 0, errors.New("payload must be less than 4096 in length")
+	}
 	res, err := sched.create_stmt.Exec(sendAt, payload)
 	if err != nil {
 		return 0, err
