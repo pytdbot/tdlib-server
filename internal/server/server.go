@@ -148,7 +148,6 @@ func (srv *Server) Start() {
 	srv.scheduler = utils.NewScheduler(filepath.Join(
 		srv.config.Section("server").Key("files_directory").String(), "database",
 	), srv.sendScheduledEvent)
-	srv.scheduler.Start()
 
 	go srv.Invoke(utils.MakeObject("getOption", utils.Params{"name": "version"}))
 	go srv.tdListener()
@@ -472,6 +471,10 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 	srv.authState = update
 
 	state := utils.Type(utils.AsMap(update["authorization_state"]))
+
+	if state == "authorizationStateReady" {
+		srv.scheduler.Start()
+	}
 
 	if state == "authorizationStateWaitTdlibParameters" {
 		srv_config := srv.config.Section("server")
