@@ -115,8 +115,7 @@ func registerSignalHandler(server *srv.Server, notifyChannel chan struct{}) {
 	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT, syscall.SIGSEGV)
 
 	go func() {
-		sig := <-sigChannel
-		fmt.Println("Received signal:", sig)
+		<-sigChannel
 		server.Close()
 		close(notifyChannel)
 	}()
