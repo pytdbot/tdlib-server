@@ -39,7 +39,8 @@ type Server struct {
 	isRunning           bool
 	isDebug             bool
 
-	waitForClosed chan bool
+	waitForReady  chan struct{}
+	waitForClosed chan struct{}
 
 	mqConnection *amqp.Connection
 	mqChannel    *amqp.Channel
@@ -108,7 +109,8 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		myIDInt:             int64(myIDInt),
 		isDebug:             debug,
 		tdRequestsInitValue: tdRequestsInitValue["verbosity_level"].(int64),
-		waitForClosed:       make(chan bool),
+		waitForReady:        make(chan struct{}),
+		waitForClosed:       make(chan struct{}),
 		broadcast_types:     mapOfTypes,
 	}, nil
 }
@@ -148,6 +150,7 @@ func (srv *Server) Start() {
 	srv.scheduler = utils.NewScheduler(filepath.Join(
 		srv.config.Section("server").Key("files_directory").String(), "database",
 	), srv.sendScheduledEvent)
+	srv.scheduler.Start()
 
 	go srv.Invoke(utils.MakeObject("getOption", utils.Params{"name": "version"}))
 	go srv.tdListener()
@@ -332,7 +335,13 @@ func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, ext
 		}
 	}
 
-	eventID, err := srv.scheduler.CreateEvent(sendAt, payload)
+	var name string
+	if n, exists := request["name"]; exists {
+		name, _ = n.(string)
+	}
+
+	<-srv.waitForReady
+	eventID, err := srv.scheduler.CreateEvent(name, sendAt, payload)
 	if err != nil {
 		srv.sendError(r.ReplyTo, 500, "Could not create scheduled event: "+err.Error(), extra)
 		return
@@ -378,9 +387,11 @@ func (srv *Server) handleCancelScheduledEventRequest(r amqp.Delivery, request Da
 	srv.sendResponse(r.ReplyTo, utils.MakeObject("ok", utils.Params{"@extra": extra, "@client_id": srv.td.ClientID}))
 }
 
-func (srv *Server) sendScheduledEvent(event_id int64, payload string) {
+func (srv *Server) sendScheduledEvent(name string, event_id int64, payload string) {
+	<-srv.waitForReady
 
 	srv.sendUpdate(utils.MakeObject("updateScheduledEvent", utils.Params{
+		"name":       name,
 		"event_id":   event_id,
 		"payload":    payload,
 		"@client_id": srv.td.ClientID,
@@ -473,7 +484,7 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 	state := utils.Type(utils.AsMap(update["authorization_state"]))
 
 	if state == "authorizationStateReady" {
-		srv.scheduler.Start()
+		close(srv.waitForReady)
 	}
 
 	if state == "authorizationStateWaitTdlibParameters" {
@@ -537,7 +548,7 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 		srv.isAuthorized = false
 	} else if state == "authorizationStateClosed" {
 		srv.isAuthorized = false
-		srv.waitForClosed <- true
+		close(srv.waitForClosed)
 	}
 
 	srv.broadcast(update)
