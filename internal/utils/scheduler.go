@@ -3,6 +3,7 @@ package utils
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -117,7 +118,7 @@ func (sched *Scheduler) createTable() {
 			version = 2
 		}
 
-		_, err = tx.Query(`PRAGMA user_version = ?`, version)
+		_, err = tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, version))
 		PanicOnErr(err, "Failed to set user_version: %v", err, true)
 	}
 
