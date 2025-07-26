@@ -3,6 +3,7 @@ package utils
 import (
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -24,6 +25,10 @@ type Scheduler struct {
 const db_version = 2
 
 func (sched *Scheduler) Start() {
+	if err := os.MkdirAll(sched.db_dir, 0755); err != nil {
+		PanicOnErr(err, "Could not create database directory: %v", err, true)
+	}
+
 	db, err := sql.Open("sqlite3", "file:"+filepath.Join(sched.db_dir, "scheduler.db")+"?_journal_mode=WAL&_synchronous=1")
 	PanicOnErr(err, "Could not open scheduler DB: %v", err, true)
 
