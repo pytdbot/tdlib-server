@@ -274,6 +274,7 @@ func (srv *Server) processRequest(r amqp.Delivery) {
 	case "cancelscheduledevent":
 		srv.handleCancelScheduledEventRequest(r, request, extra)
 	default:
+		<-srv.waitForReady
 		extra["routing_key"] = r.ReplyTo
 		srv.send(request)
 	}
