@@ -626,6 +626,7 @@ func (srv *Server) startRabbitMQ() {
 	password := url.QueryEscape(rb_config.Key("password").String())
 	host := rb_config.Key("host").String()
 	port := rb_config.Key("port").String()
+	exclusive, _ := rb_config.Key("exclusive").Bool()
 
 	connection, err := amqp.Dial("amqp://" + username + ":" + password + "@" + host + ":" + port + "/")
 	utils.PanicOnErr(err, "Could not connect to RabbitMQ: %v", err, true)
@@ -647,7 +648,7 @@ func (srv *Server) startRabbitMQ() {
 		srv.myID+"_updates", // name
 		false,               // durable
 		false,               // delete when unused
-		false,               // exclusive
+		exclusive,           // exclusive
 		false,               // no-wait
 		nil,                 // arguments
 	)
@@ -658,7 +659,7 @@ func (srv *Server) startRabbitMQ() {
 		srv.myID+"_requests", // name
 		false,                // durable
 		false,                // delete when unused
-		false,                // exclusive
+		exclusive,            // exclusive
 		false,                // no-wait
 		nil,                  // arguments
 	)
