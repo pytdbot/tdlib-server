@@ -626,7 +626,7 @@ func (srv *Server) startRabbitMQ() {
 	password := url.QueryEscape(rb_config.Key("password").String())
 	host := rb_config.Key("host").String()
 	port := rb_config.Key("port").String()
-	exclusive, _ := rb_config.Key("exclusive").Bool()
+	delete_on_startup, _ := rb_config.Key("delete_on_startup").Bool()
 
 	connection, err := amqp.Dial("amqp://" + username + ":" + password + "@" + host + ":" + port + "/")
 	utils.PanicOnErr(err, "Could not connect to RabbitMQ: %v", err, true)
@@ -644,22 +644,31 @@ func (srv *Server) startRabbitMQ() {
 		nil,         // arguments
 	)
 
+	if delete_on_startup {
+		channel.QueueDelete(srv.myID+"_updates", false, false, false)
+	}
+
 	updatesQueue, err := channel.QueueDeclare(
 		srv.myID+"_updates", // name
 		false,               // durable
 		false,               // delete when unused
-		exclusive,           // exclusive
+		false,               // exclusive
 		false,               // no-wait
 		nil,                 // arguments
 	)
 	utils.PanicOnErr(err, "Could not declare updates queue: %v", err, false)
+
 	srv.updatesQueue = &updatesQueue
+
+	if delete_on_startup {
+		channel.QueueDelete(srv.myID+"_requests", false, false, false)
+	}
 
 	requestsQueue, err := channel.QueueDeclare(
 		srv.myID+"_requests", // name
 		false,                // durable
 		false,                // delete when unused
-		exclusive,            // exclusive
+		false,                // exclusive
 		false,                // no-wait
 		nil,                  // arguments
 	)
