@@ -635,13 +635,13 @@ func (srv *Server) startRabbitMQ() {
 	utils.PanicOnErr(err, "Could not open a Channel: %v", err, true)
 
 	channel.ExchangeDeclare(
-		"broadcast", // exchange name
-		"fanout",    // exchange type
-		false,       // durable
-		false,       // auto-deleted
-		false,       // internal
-		false,       // no-wait
-		nil,         // arguments
+		srv.myID+"_broadcast", // exchange name
+		"fanout",              // exchange type
+		false,                 // durable
+		false,                 // auto-deleted
+		false,                 // internal
+		false,                 // no-wait
+		nil,                   // arguments
 	)
 
 	if delete_on_startup {
