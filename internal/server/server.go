@@ -56,6 +56,8 @@ type Server struct {
 	updates_count  atomic.Int64
 	requests_count atomic.Int64
 	uptime         time.Time
+
+	closeTimeout time.Duration
 }
 
 // New creates and initializes a new Server instance with the specified verbosity level
@@ -66,6 +68,11 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 
 	if err != nil {
 		return nil, fmt.Errorf("fail to read configuration file "+config_path+": %v", err)
+	}
+
+	closeTimeoutSeconds, err := cfg.Section("server").Key("close_timeout").Int()
+	if err != nil {
+		closeTimeoutSeconds = 0
 	}
 
 	listRaw := strings.Split(cfg.Section("server").Key("broadcast_types").String(), ",")
@@ -112,6 +119,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		waitForReady:        make(chan struct{}),
 		waitForClosed:       make(chan struct{}),
 		broadcast_types:     mapOfTypes,
+		closeTimeout:        time.Duration(closeTimeoutSeconds) * time.Second,
 	}, nil
 }
 
@@ -124,7 +132,25 @@ func (srv *Server) Close() (bool, error) {
 	res, ok := srv.Invoke(utils.MakeObject("close", utils.Params{}))
 
 	if ok {
-		<-srv.waitForClosed
+
+		var timeoutChannel <-chan time.Time
+		if srv.closeTimeout > 0 {
+			timeoutChannel = time.After(srv.closeTimeout)
+		}
+
+		should_panic := false
+
+		select {
+		case <-srv.waitForClosed:
+			if srv.isDebug {
+				fmt.Println("TDLib closed gracefully.")
+			}
+		case <-timeoutChannel:
+			should_panic = true
+			fmt.Println("Timeout waiting for TDLib to send authorizationStateClosed. Sending fake authorizationStateClosed.")
+
+			srv.broadcast(srv.getFakeUpdateAuthClosed())
+		}
 
 		srv.setIsRunning(false)
 		srv.results.ClearChannels(true)
@@ -136,6 +162,10 @@ func (srv *Server) Close() (bool, error) {
 		srv.mqConnection.Close()
 
 		srv.scheduler.Close()
+		if should_panic {
+			panic("TDLib did not close in time")
+		}
+
 		return true, nil
 	}
 
