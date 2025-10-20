@@ -766,10 +766,10 @@ func (srv *Server) sendUpdate(update Data) {
 
 func (srv *Server) broadcast(update Data) {
 	err := srv.mqChannel.Publish(
-		"broadcast", // exchange
-		"",          // routing key
-		false,       // mandatory
-		false,       // immediate
+		srv.myID+"_broadcast", // exchange
+		"",                    // routing key
+		false,                 // mandatory
+		false,                 // immediate
 		amqp.Publishing{
 			ContentType: "application/json",
 			Body:        []byte(utils.UnsafeMarshal(update)),
