@@ -44,6 +44,8 @@ type Server struct {
 
 	mqConnection *amqp.Connection
 	mqChannel    *amqp.Channel
+	mqMutex      sync.Mutex
+	mqReady      atomic.Bool
 
 	updatesQueue  *amqp.Queue
 	requestsQueue *amqp.Queue
@@ -155,11 +157,12 @@ func (srv *Server) Close() (bool, error) {
 		srv.setIsRunning(false)
 		srv.results.ClearChannels(true)
 
-		srv.mqChannel.QueueDelete(srv.updatesQueue.Name, false, false, false)
-		srv.mqChannel.QueueDelete(srv.requestsQueue.Name, false, false, false)
-
-		srv.mqChannel.Close()
-		srv.mqConnection.Close()
+		if srv.mqConnection != nil && !srv.mqConnection.IsClosed() {
+			srv.mqChannel.QueueDelete(srv.updatesQueue.Name, false, false, false)
+			srv.mqChannel.QueueDelete(srv.requestsQueue.Name, false, false, false)
+			srv.mqChannel.Close()
+			srv.mqConnection.Close()
+		}
 
 		srv.scheduler.Close()
 		if should_panic {
@@ -639,6 +642,11 @@ func (srv *Server) tdListener() {
 	defer srv.setIsRunning(false)
 
 	for srv.isRunning {
+		if !srv.mqReady.Load() {
+			time.Sleep(time.Second)
+			continue
+		}
+
 		res := srv.td.Receive(1000.0)
 		if res == "" {
 			continue
@@ -650,8 +658,19 @@ func (srv *Server) tdListener() {
 }
 
 func (srv *Server) startRabbitMQ() {
-	rb_config := srv.config.Section("rabbitmq")
+	err := srv.connectMQ()
+	utils.PanicOnErr(err, "Failed to connect to RabbitMQ on startup: %v", err, true)
 
+	srv.mqReady.Store(true)
+	go srv.requestsListener()
+	go srv.mqConnectionWatcher()
+}
+
+func (srv *Server) connectMQ() error {
+	srv.mqMutex.Lock()
+	defer srv.mqMutex.Unlock()
+
+	rb_config := srv.config.Section("rabbitmq")
 	username := url.QueryEscape(rb_config.Key("username").String())
 	password := url.QueryEscape(rb_config.Key("password").String())
 	host := rb_config.Key("host").String()
@@ -659,12 +678,17 @@ func (srv *Server) startRabbitMQ() {
 	delete_on_startup, _ := rb_config.Key("delete_on_startup").Bool()
 
 	connection, err := amqp.Dial("amqp://" + username + ":" + password + "@" + host + ":" + port + "/")
-	utils.PanicOnErr(err, "Could not connect to RabbitMQ: %v", err, true)
+	if err != nil {
+		return fmt.Errorf("could not connect to RabbitMQ: %w", err)
+	}
 
 	channel, err := connection.Channel()
-	utils.PanicOnErr(err, "Could not open a Channel: %v", err, true)
+	if err != nil {
+		connection.Close()
+		return fmt.Errorf("could not open a Channel: %w", err)
+	}
 
-	channel.ExchangeDeclare(
+	err = channel.ExchangeDeclare(
 		srv.myID+"_broadcast", // exchange name
 		"fanout",              // exchange type
 		false,                 // durable
@@ -673,6 +697,11 @@ func (srv *Server) startRabbitMQ() {
 		false,                 // no-wait
 		nil,                   // arguments
 	)
+	if err != nil {
+		channel.Close()
+		connection.Close()
+		return fmt.Errorf("could not declare exchange: %w", err)
+	}
 
 	if delete_on_startup {
 		channel.QueueDelete(srv.myID+"_updates", false, false, false)
@@ -686,8 +715,11 @@ func (srv *Server) startRabbitMQ() {
 		false,               // no-wait
 		nil,                 // arguments
 	)
-	utils.PanicOnErr(err, "Could not declare updates queue: %v", err, false)
-
+	if err != nil {
+		channel.Close()
+		connection.Close()
+		return fmt.Errorf("could not declare updates queue: %w", err)
+	}
 	srv.updatesQueue = &updatesQueue
 
 	if delete_on_startup {
@@ -702,13 +734,45 @@ func (srv *Server) startRabbitMQ() {
 		false,                // no-wait
 		nil,                  // arguments
 	)
-	utils.PanicOnErr(err, "Could not declare requests queue: %v", err, false)
+	if err != nil {
+		channel.Close()
+		connection.Close()
+		return fmt.Errorf("could not declare requests queue: %w", err)
+	}
 	srv.requestsQueue = &requestsQueue
 
 	srv.mqConnection = connection
 	srv.mqChannel = channel
 
-	go srv.requestsListener()
+	return nil
+}
+
+func (srv *Server) mqConnectionWatcher() {
+	closeChan := srv.mqConnection.NotifyClose(make(chan *amqp.Error))
+	err := <-closeChan
+	if err != nil {
+		fmt.Printf("RabbitMQ connection lost: %v. Reconnecting...\n", err)
+	} else {
+		fmt.Println("RabbitMQ connection closed gracefully.")
+		return
+	}
+
+	srv.mqReady.Store(false)
+
+	for {
+		fmt.Println("Attempting to reconnect to RabbitMQ...")
+		err := srv.connectMQ()
+		if err == nil {
+			srv.mqReady.Store(true)
+			go srv.requestsListener()
+			go srv.mqConnectionWatcher()
+			fmt.Println("Successfully reconnected to RabbitMQ.")
+			return
+		}
+
+		fmt.Printf("Failed to reconnect: %v. Retrying in 5 seconds...\n", err)
+		time.Sleep(5 * time.Second)
+	}
 }
 
 func (srv *Server) requestsListener() {
@@ -721,11 +785,16 @@ func (srv *Server) requestsListener() {
 		true,                   // No-wait
 		nil,                    // Additional arguments
 	)
-	utils.PanicOnErr(err, "Could not consume requests queue: %v", err, false)
+	if err != nil {
+		fmt.Printf("Could not start consuming requests: %v\n", err)
+		return
+	}
 
 	for request := range requests {
 		go srv.processRequest(request)
 	}
+
+	fmt.Println("Requests listener stopped.")
 }
 
 func (srv *Server) sendError(routing_key string, code int, message string, extra Data) {
@@ -738,7 +807,11 @@ func (srv *Server) sendError(routing_key string, code int, message string, extra
 }
 
 func (srv *Server) sendResponse(routing_key string, update Data) {
-	srv.mqChannel.Publish(
+	if !srv.mqReady.Load() {
+		return
+	}
+
+	err := srv.mqChannel.Publish(
 		"",          // exchange
 		routing_key, // routing key
 		false,       // mandatory
@@ -748,9 +821,16 @@ func (srv *Server) sendResponse(routing_key string, update Data) {
 			Body:        []byte(utils.UnsafeMarshal(update)),
 		},
 	)
+	if err != nil {
+		fmt.Printf("Failed to publish response: %v\n", err)
+	}
 }
 
 func (srv *Server) sendUpdate(update Data) {
+	if !srv.mqReady.Load() {
+		return
+	}
+
 	err := srv.mqChannel.Publish(
 		"",                    // exchange
 		srv.updatesQueue.Name, // routing key
@@ -761,10 +841,16 @@ func (srv *Server) sendUpdate(update Data) {
 			Body:        []byte(utils.UnsafeMarshal(update)),
 		},
 	)
-	utils.PanicOnErr(err, "Could not publish message: %v", err, false)
+	if err != nil {
+		fmt.Printf("Failed to publish update: %v\n", err)
+	}
 }
 
 func (srv *Server) broadcast(update Data) {
+	if !srv.mqReady.Load() {
+		return
+	}
+
 	err := srv.mqChannel.Publish(
 		srv.myID+"_broadcast", // exchange
 		"",                    // routing key
@@ -775,5 +861,7 @@ func (srv *Server) broadcast(update Data) {
 			Body:        []byte(utils.UnsafeMarshal(update)),
 		},
 	)
-	utils.PanicOnErr(err, "Could not publish broadcasted message: %v", err, false)
+	if err != nil {
+		fmt.Printf("Failed to publish broadcast message: %v\n", err)
+	}
 }
