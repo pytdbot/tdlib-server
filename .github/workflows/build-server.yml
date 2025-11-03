@@ -27,7 +27,7 @@ jobs:
 
         docker run --rm -v "$PWD:/work" -w /work quay.io/pypa/manylinux2014_x86_64 \
           bash -c '
-          curl -s https://raw.githubusercontent.com/AYMENJD/tdjson/refs/heads/main/.github/workflows/before-all.sh | bash
+          curl -s https://raw.githubusercontent.com/AYMENJD/tdjson/refs/heads/main/.github/workflows/scripts/before-all-linux-64.sh | bash
 
           curl -OL https://go.dev/dl/go1.21.0.linux-amd64.tar.gz
           tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz
