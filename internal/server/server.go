@@ -47,8 +47,9 @@ type Server struct {
 	mqMutex      sync.Mutex
 	mqReady      atomic.Bool
 
-	updatesQueue  *amqp.Queue
-	requestsQueue *amqp.Queue
+	updatesQueue     *amqp.Queue
+	requestsQueue    *amqp.Queue
+	broadcastExcName string
 
 	scheduler *utils.Scheduler
 
@@ -112,6 +113,8 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		td:        td,
 		requestID: utils.NewIdGenerator(),
 		results:   utils.NewSafeResultsMap(),
+
+		broadcastExcName: myID + "_broadcast",
 
 		options:             make(Data),
 		myID:                myID,
@@ -748,30 +751,41 @@ func (srv *Server) connectMQ() error {
 }
 
 func (srv *Server) mqConnectionWatcher() {
-	closeChan := srv.mqConnection.NotifyClose(make(chan *amqp.Error))
-	err := <-closeChan
-	if err != nil {
-		fmt.Printf("RabbitMQ connection lost: %v. Reconnecting...\n", err)
-	} else {
-		fmt.Println("RabbitMQ connection closed gracefully.")
-		return
-	}
-
-	srv.mqReady.Store(false)
+	const checkInterval = 500 * time.Millisecond
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
 
 	for {
-		fmt.Println("Attempting to reconnect to RabbitMQ...")
-		err := srv.connectMQ()
-		if err == nil {
-			srv.mqReady.Store(true)
-			go srv.requestsListener()
-			go srv.mqConnectionWatcher()
-			fmt.Println("Successfully reconnected to RabbitMQ.")
+		select {
+		case <-ticker.C:
+			if !srv.IsRunning() {
+				fmt.Println("RabbitMQ connection watcher stopped.")
+				return
+			}
+
+			if srv.mqConnection == nil || srv.mqConnection.IsClosed() {
+				if srv.mqReady.Load() {
+					fmt.Println("RabbitMQ connection lost. Attempting to reconnect...")
+					srv.mqReady.Store(false)
+				}
+
+				err := srv.connectMQ()
+				if err == nil {
+					fmt.Println("Successfully reconnected to RabbitMQ.")
+					srv.mqReady.Store(true)
+
+					go srv.requestsListener()
+				} else {
+					if !srv.mqReady.Load() {
+						fmt.Printf("Failed to reconnect: %v. Retrying in %v...\n", err, checkInterval)
+					}
+				}
+			}
+
+		case <-srv.waitForClosed:
+			fmt.Println("RabbitMQ connection watcher stopped due to server shutdown.")
 			return
 		}
-
-		fmt.Printf("Failed to reconnect: %v. Retrying in 5 seconds...\n", err)
-		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -807,61 +821,39 @@ func (srv *Server) sendError(routing_key string, code int, message string, extra
 }
 
 func (srv *Server) sendResponse(routing_key string, update Data) {
-	if !srv.mqReady.Load() {
-		return
-	}
-
-	err := srv.mqChannel.Publish(
-		"",          // exchange
-		routing_key, // routing key
-		false,       // mandatory
-		false,       // immediate
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        []byte(utils.UnsafeMarshal(update)),
-		},
-	)
-	if err != nil {
-		fmt.Printf("Failed to publish response: %v\n", err)
-	}
+	srv.publishWithRetry("", routing_key, update)
 }
 
 func (srv *Server) sendUpdate(update Data) {
-	if !srv.mqReady.Load() {
-		return
-	}
-
-	err := srv.mqChannel.Publish(
-		"",                    // exchange
-		srv.updatesQueue.Name, // routing key
-		false,                 // mandatory
-		false,                 // immediate
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        []byte(utils.UnsafeMarshal(update)),
-		},
-	)
-	if err != nil {
-		fmt.Printf("Failed to publish update: %v\n", err)
-	}
+	srv.publishWithRetry("", srv.updatesQueue.Name, update)
 }
 
 func (srv *Server) broadcast(update Data) {
-	if !srv.mqReady.Load() {
-		return
-	}
+	srv.publishWithRetry(srv.broadcastExcName, "", update)
+}
 
-	err := srv.mqChannel.Publish(
-		srv.myID+"_broadcast", // exchange
-		"",                    // routing key
-		false,                 // mandatory
-		false,                 // immediate
-		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        []byte(utils.UnsafeMarshal(update)),
-		},
-	)
-	if err != nil {
-		fmt.Printf("Failed to publish broadcast message: %v\n", err)
+func (srv *Server) publishWithRetry(exchange string, routing_key string, update Data) {
+	for x := 0; x < 3; x++ {
+		if !srv.isRunning {
+			return
+		}
+
+		err := srv.mqChannel.Publish(
+			exchange,    // exchange
+			routing_key, // routing key
+			false,       // mandatory
+			false,       // immediate
+			amqp.Publishing{
+				ContentType: "application/json",
+				Body:        []byte(utils.UnsafeMarshal(update)),
+			},
+		)
+
+		if err != nil {
+			fmt.Printf("Failed publish to %s (route: %s) message: %v\n", exchange, routing_key, err)
+			time.Sleep(time.Second)
+		} else {
+			break
+		}
 	}
 }
