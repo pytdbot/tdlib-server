@@ -56,7 +56,7 @@ func createCLIApp() *cli.App {
 				Action: updateServer,
 			},
 		},
-		Copyright:            "Copyright (c) 2024-2025 Pytdbot, AYMENJD",
+		Copyright:            "Copyright (c) 2024-2026 Pytdbot, AYMENJD",
 		Version:              srv.Version,
 		EnableBashCompletion: true,
 		Flags: []cli.Flag{
