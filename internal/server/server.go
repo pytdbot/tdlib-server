@@ -325,7 +325,7 @@ func (srv *Server) processUpdate(update Data) {
 
 func (srv *Server) processRequest(r amqp.Delivery) {
 
-	if r.ReplyTo == "" || !srv.isRunning {
+	if r.ReplyTo == "" || !srv.isRunning.Load() {
 		return // invalid request
 	}
 
@@ -685,7 +685,7 @@ func (srv *Server) tdListener() {
 	srv.setIsRunning(true)
 	defer srv.setIsRunning(false)
 
-	for srv.isRunning {
+	for srv.isRunning.Load() {
 		if !srv.mqReady.Load() {
 			time.Sleep(time.Second)
 			continue
