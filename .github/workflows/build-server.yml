@@ -29,9 +29,9 @@ jobs:
           bash -c '
           curl -s https://raw.githubusercontent.com/AYMENJD/tdjson/refs/heads/main/.github/workflows/scripts/before-all-linux-64.sh | bash
 
-          curl -OL https://go.dev/dl/go1.21.0.linux-amd64.tar.gz
-          tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz
-          rm -f go1.21.0.linux-amd64.tar.gz
+          curl -OL https://go.dev/dl/go1.26.3.linux-amd64.tar.gz
+          tar -C /usr/local -xzf go1.26.3.linux-amd64.tar.gz
+          rm -f go1.26.3.linux-amd64.tar.gz
           export PATH=$PATH:/usr/local/go/bin
 
           make static
