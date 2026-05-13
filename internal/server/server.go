@@ -2,9 +2,7 @@ package server
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -13,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	amqp "github.com/rabbitmq/amqp091-go"
+	nats "github.com/nats-io/nats.go"
 
 	"gopkg.in/ini.v1"
 
@@ -49,19 +47,11 @@ type Server struct {
 	waitForReady  chan struct{}
 	waitForClosed chan struct{}
 
-	mqConnection *amqp.Connection
+	natsConn *nats.Conn
 
-	publishChannel *amqp.Channel
-	consumeChannel *amqp.Channel
-
-	mqMutex sync.RWMutex
-	mqReady atomic.Bool
-
-	publishQueue chan PublishRequest
-
-	updatesQueue     *amqp.Queue
-	requestsQueue    *amqp.Queue
-	broadcastExcName string
+	updatesSubject   string
+	requestsSubject  string
+	broadcastSubject string
 
 	scheduler *utils.Scheduler
 
@@ -126,7 +116,9 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		requestID: utils.NewIdGenerator(),
 		results:   utils.NewSafeResultsMap(),
 
-		broadcastExcName: myID + "_broadcast",
+		updatesSubject:   "bot." + myID + ".updates",
+		requestsSubject:  "bot." + myID + ".requests",
+		broadcastSubject: "bot." + myID + ".broadcast",
 
 		options:             make(Data),
 		myID:                myID,
@@ -135,7 +127,6 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		tdRequestsInitValue: tdRequestsInitValue["verbosity_level"].(int64),
 		waitForReady:        make(chan struct{}),
 		waitForClosed:       make(chan struct{}),
-		publishQueue:        make(chan PublishRequest, 10000),
 		broadcast_types:     mapOfTypes,
 		closeTimeout:        time.Duration(closeTimeoutSeconds) * time.Second,
 	}, nil
@@ -146,82 +137,59 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 // It returns a boolean indicating whether the shutdown was successful and an error
 // if the shutdown fails.
 func (srv *Server) Close() (bool, error) {
-
 	res, ok := srv.Invoke(utils.MakeObject("close", utils.Params{}))
 
-	if ok {
-
-		var timeoutChannel <-chan time.Time
-		if srv.closeTimeout > 0 {
-			timeoutChannel = time.After(srv.closeTimeout)
-		}
-
-		should_panic := false
-
-		select {
-		case <-srv.waitForClosed:
-			if srv.isDebug {
-				fmt.Println("TDLib closed gracefully.")
-			}
-		case <-timeoutChannel:
-			should_panic = true
-			fmt.Println("Timeout waiting for TDLib to send authorizationStateClosed. Sending fake authorizationStateClosed.")
-
-			srv.broadcast(srv.getFakeUpdateAuthClosed())
-		}
-
-		srv.setIsRunning(false)
-		srv.results.ClearChannels(true)
-
-		srv.mqMutex.Lock()
-
-		if srv.publishChannel != nil {
-			if srv.updatesQueue != nil {
-				_, _ = srv.publishChannel.QueueDelete(
-					srv.updatesQueue.Name,
-					false,
-					false,
-					false,
-				)
-			}
-
-			if srv.requestsQueue != nil {
-				_, _ = srv.publishChannel.QueueDelete(
-					srv.requestsQueue.Name,
-					false,
-					false,
-					false,
-				)
-			}
-
-			_ = srv.publishChannel.Close()
-		}
-
-		if srv.consumeChannel != nil {
-			_ = srv.consumeChannel.Close()
-		}
-
-		if srv.mqConnection != nil && !srv.mqConnection.IsClosed() {
-			_ = srv.mqConnection.Close()
-		}
-
-		srv.mqMutex.Unlock()
-		close(srv.publishQueue)
-
-		srv.scheduler.Close()
-		if should_panic {
-			panic("TDLib did not close in time")
-		}
-
-		return true, nil
+	if !ok {
+		return false, fmt.Errorf(res["message"].(string))
 	}
 
-	return false, fmt.Errorf(res["message"].(string))
+	var timeoutChannel <-chan time.Time
+
+	if srv.closeTimeout > 0 {
+		timeoutChannel = time.After(srv.closeTimeout)
+	}
+
+	shouldPanic := false
+
+	select {
+	case <-srv.waitForClosed:
+		if srv.isDebug {
+			fmt.Println("TDLib closed gracefully.")
+		}
+	case <-timeoutChannel:
+		shouldPanic = true
+
+		fmt.Println(
+			"Timeout waiting for TDLib authorizationStateClosed. Sending fake closed update.",
+		)
+
+		srv.broadcast(srv.getFakeUpdateAuthClosed())
+	}
+
+	srv.setIsRunning(false)
+	srv.results.Clear()
+
+	srv.scheduler.Close()
+
+	if srv.natsConn != nil {
+		err := srv.natsConn.Drain()
+
+		if err != nil {
+			fmt.Printf("NATS drain error: %v\n", err)
+		}
+
+		srv.natsConn.Close()
+	}
+
+	if shouldPanic {
+		panic("TDLib did not close in time")
+	}
+
+	return true, nil
 }
 
 func (srv *Server) Start() {
-
-	srv.startRabbitMQ()
+	srv.startNATS()
 
 	srv.uptime = time.Now()
 	srv.scheduler = utils.NewScheduler(filepath.Join(
@@ -261,6 +229,7 @@ func (srv *Server) Options() Data {
 // along with a boolean indicating whether the request was successful.
 func (srv *Server) Invoke(request Data) (Data, bool) {
 	request_id := strconv.Itoa(srv.requestID.GenerateID())
+
 	request["@extra"] = make(Data)
 	request["@extra"].(Data)["request_id"] = request_id
 
@@ -268,13 +237,22 @@ func (srv *Server) Invoke(request Data) (Data, bool) {
 
 	srv.send(request)
 
-	response := <-channel
+	select {
 
-	if utils.Type(response) == "error" {
-		return response, false
+	case response := <-channel:
+
+		if utils.Type(response) == "error" {
+			return response, false
+		}
+
+		return response, true
+
+	case <-srv.waitForClosed:
+
+		srv.results.Delete(request_id)
+
+		return utils.MakeError(500, "TDLib closed"), false
 	}
-
-	return response, true
 }
 
 func (srv *Server) processUpdate(update Data) {
@@ -294,7 +272,7 @@ func (srv *Server) processUpdate(update Data) {
 			if requestID, ok := extraMap["request_id"].(string); ok {
 				if channel, found := srv.results.Get(requestID); found {
 					srv.results.SafeSend(channel, update)
-					srv.results.Delete(requestID, false)
+					srv.results.Delete(requestID)
 				}
 			}
 		}
@@ -323,13 +301,13 @@ func (srv *Server) processUpdate(update Data) {
 	}
 }
 
-func (srv *Server) processRequest(r amqp.Delivery) {
+func (srv *Server) processRequest(r *nats.Msg) {
 
-	if r.ReplyTo == "" || !srv.isRunning.Load() {
+	if r.Reply == "" || !srv.isRunning.Load() {
 		return // invalid request
 	}
 
-	request, err := utils.Unmarshal(string(r.Body))
+	request, err := utils.Unmarshal(string(r.Data))
 	if err != nil {
 		return
 	}
@@ -340,8 +318,8 @@ func (srv *Server) processRequest(r amqp.Delivery) {
 	}
 
 	switch strings.ToLower(utils.Type(request)) {
-	case "close": // ignore close requests and send fake authorizationStateClosing and authorizationStateClosed
-		srv.handleCloseRequest(r, extra)
+	case "close":
+		srv.handleCloseRequest(r, extra) // ignore close requests; returns OK immediately
 	case "getcurrentstate":
 		srv.handleGetCurrentStateRequest(r, extra)
 	case "getserverstats":
@@ -352,36 +330,33 @@ func (srv *Server) processRequest(r amqp.Delivery) {
 		srv.handleCancelScheduledEventRequest(r, request, extra)
 	default:
 		<-srv.waitForReady
-		extra["routing_key"] = r.ReplyTo
+		extra["routing_key"] = r.Reply
 		srv.send(request)
 	}
-
 }
 
-func (srv *Server) handleCloseRequest(r amqp.Delivery, extra Data) {
-	srv.sendResponse(r.ReplyTo, utils.MakeObject("ok", utils.Params{"@extra": extra, "@client_id": srv.td.ClientID}))
-	srv.sendResponse(r.ReplyTo, srv.getFakeUpdateAuthClosing())
-	srv.sendResponse(r.ReplyTo, srv.getFakeUpdateAuthClosed())
+func (srv *Server) handleCloseRequest(r *nats.Msg, extra Data) {
+	srv.sendResponse(r.Reply, utils.MakeObject("ok", utils.Params{"@extra": extra, "@client_id": srv.td.ClientID}))
 }
 
-func (srv *Server) handleGetCurrentStateRequest(r amqp.Delivery, extra Data) {
+func (srv *Server) handleGetCurrentStateRequest(r *nats.Msg, extra Data) {
 	state := srv.getCurrentState()
 	state["@extra"] = extra
 	state["@client_id"] = srv.td.ClientID
-	srv.sendResponse(r.ReplyTo, state)
+	srv.sendResponse(r.Reply, state)
 }
 
-func (srv *Server) handleGetServerStatsRequest(r amqp.Delivery, extra Data) {
+func (srv *Server) handleGetServerStatsRequest(r *nats.Msg, extra Data) {
 	stats := srv.getStats()
 	stats["@extra"] = extra
 	stats["@client_id"] = srv.td.ClientID
-	srv.sendResponse(r.ReplyTo, stats)
+	srv.sendResponse(r.Reply, stats)
 }
 
-func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, extra Data) {
+func (srv *Server) handleScheduleEventRequest(r *nats.Msg, request Data, extra Data) {
 	sendAtValue, ok := request["send_at"]
 	if !ok {
-		srv.sendError(r.ReplyTo, 400, "send_at is required", extra)
+		srv.sendError(r.Reply, 400, "send_at is required", extra)
 		return
 	}
 
@@ -394,12 +369,12 @@ func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, ext
 	case int:
 		sendAt = int64(v)
 	default:
-		srv.sendError(r.ReplyTo, 400, "send_at must be a number", extra)
+		srv.sendError(r.Reply, 400, "send_at must be a number", extra)
 		return
 	}
 
 	if sendAt < time.Now().Unix() {
-		srv.sendError(r.ReplyTo, 400, "send_at must be in the future", extra)
+		srv.sendError(r.Reply, 400, "send_at must be in the future", extra)
 		return
 	}
 
@@ -408,7 +383,7 @@ func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, ext
 		var ok bool
 		payload, ok = p.(string)
 		if !ok {
-			srv.sendError(r.ReplyTo, 400, "payload must be a string", extra)
+			srv.sendError(r.Reply, 400, "payload must be a string", extra)
 			return
 		}
 	}
@@ -421,11 +396,11 @@ func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, ext
 	<-srv.waitForReady
 	eventID, err := srv.scheduler.CreateEvent(name, sendAt, payload)
 	if err != nil {
-		srv.sendError(r.ReplyTo, 500, "Could not create scheduled event: "+err.Error(), extra)
+		srv.sendError(r.Reply, 500, "Could not create scheduled event: "+err.Error(), extra)
 		return
 	}
 
-	srv.sendResponse(r.ReplyTo, utils.MakeObject("scheduledEvent", utils.Params{
+	srv.sendResponse(r.Reply, utils.MakeObject("scheduledEvent", utils.Params{
 		"event_id":   eventID,
 		"send_at":    sendAt,
 		"@extra":     extra,
@@ -433,10 +408,10 @@ func (srv *Server) handleScheduleEventRequest(r amqp.Delivery, request Data, ext
 	}))
 }
 
-func (srv *Server) handleCancelScheduledEventRequest(r amqp.Delivery, request Data, extra Data) {
+func (srv *Server) handleCancelScheduledEventRequest(r *nats.Msg, request Data, extra Data) {
 	rawID, ok := request["event_id"]
 	if !ok {
-		srv.sendError(r.ReplyTo, 400, "event_id is required", extra)
+		srv.sendError(r.Reply, 400, "event_id is required", extra)
 		return
 	}
 
@@ -449,20 +424,20 @@ func (srv *Server) handleCancelScheduledEventRequest(r amqp.Delivery, request Da
 	case int64:
 		eventID = v
 	default:
-		srv.sendError(r.ReplyTo, 400, "event_id must be an integer", extra)
+		srv.sendError(r.Reply, 400, "event_id must be an integer", extra)
 		return
 	}
 
 	code := srv.scheduler.CancelEvent(eventID)
 	if code == 0 {
-		srv.sendError(r.ReplyTo, 400, "Event not found", extra)
+		srv.sendError(r.Reply, 400, "Event not found", extra)
 		return
 	}
 	if code < 0 {
-		srv.sendError(r.ReplyTo, 500, "Failed to cancel event", extra)
+		srv.sendError(r.Reply, 500, "Failed to cancel event", extra)
 	}
 
-	srv.sendResponse(r.ReplyTo, utils.MakeObject("ok", utils.Params{"@extra": extra, "@client_id": srv.td.ClientID}))
+	srv.sendResponse(r.Reply, utils.MakeObject("ok", utils.Params{"@extra": extra, "@client_id": srv.td.ClientID}))
 }
 
 func (srv *Server) sendScheduledEvent(name string, event_id int64, payload string) {
@@ -557,7 +532,10 @@ func (srv *Server) IsRunning() bool {
 }
 
 func (srv *Server) handleUpdateAuthorizationState(update Data) {
+
+	srv.stateMu.Lock()
 	srv.authState = update
+	srv.stateMu.Unlock()
 
 	state := utils.Type(utils.AsMap(update["authorization_state"]))
 
@@ -566,6 +544,7 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 	}
 
 	if state == "authorizationStateWaitTdlibParameters" {
+
 		srv_config := srv.config.Section("server")
 
 		use_test_dc, err := srv_config.Key("use_test_dc").Bool()
@@ -609,6 +588,7 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 		utils.PanicOnErr(ok, "Could not set TDLib parameters: %v", res["message"], true)
 
 	} else if state == "authorizationStateWaitPhoneNumber" {
+
 		res, ok := srv.Invoke(
 			utils.MakeObject(
 				"checkAuthenticationBotToken",
@@ -621,10 +601,16 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 		utils.PanicOnErr(ok, "Could not set bot token: %v", res["message"], true)
 
 	} else if state == "authorizationStateReady" {
+
 		srv.isAuthorized = true
-	} else if state == "authorizationStateLoggingOut" || state == "authorizationStateClosing" {
+
+	} else if state == "authorizationStateLoggingOut" ||
+		state == "authorizationStateClosing" {
+
 		srv.isAuthorized = false
+
 	} else if state == "authorizationStateClosed" {
+
 		srv.isAuthorized = false
 		close(srv.waitForClosed)
 	}
@@ -633,7 +619,10 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 }
 
 func (srv *Server) handleUpdateConnectionState(connectionState Data) {
+	srv.stateMu.Lock()
 	srv.connectionState = connectionState
+	srv.stateMu.Unlock()
+
 	srv.broadcast(connectionState)
 }
 
@@ -686,272 +675,65 @@ func (srv *Server) tdListener() {
 	defer srv.setIsRunning(false)
 
 	for srv.isRunning.Load() {
-		if !srv.mqReady.Load() {
-			time.Sleep(time.Second)
-			continue
-		}
-
 		res := srv.td.Receive(1000.0)
 		if res == "" {
 			continue
 		}
 
-		go srv.processUpdate(utils.UnsafeUnmarshal(res))
+		update := utils.UnsafeUnmarshal(res)
 
+		if _, isResponse := update["@extra"]; isResponse {
+			srv.processUpdate(update)
+		} else {
+
+			go srv.processUpdate(update)
+
+		}
 	}
 }
 
-func (srv *Server) startRabbitMQ() {
-	err := srv.connectMQ()
-	utils.PanicOnErr(err, "Failed to connect to RabbitMQ on startup: %v", err, true)
+func (srv *Server) startNATS() {
+	cfg := srv.config.Section("nats")
 
-	srv.mqReady.Store(true)
+	url := cfg.Key("url").MustString(nats.DefaultURL)
 
-	go srv.publisher()
-	go srv.requestsListener()
-	go srv.mqConnectionWatcher()
-}
+	nc, err := nats.Connect(
+		url,
 
-func (srv *Server) connectMQ() error {
-	srv.mqMutex.Lock()
-	defer srv.mqMutex.Unlock()
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2*time.Second),
 
-	rbConfig := srv.config.Section("rabbitmq")
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			fmt.Printf("NATS disconnected: %v\n", err)
+		}),
 
-	username := url.QueryEscape(rbConfig.Key("username").String())
-	password := url.QueryEscape(rbConfig.Key("password").String())
-	host := rbConfig.Key("host").String()
-	port := rbConfig.Key("port").String()
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			fmt.Println("NATS reconnected.")
+		}),
 
-	deleteOnStartup, _ := rbConfig.Key("delete_on_startup").Bool()
-
-	connection, err := amqp.Dial(
-		"amqp://" + username + ":" + password + "@" + host + ":" + port + "/",
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			fmt.Println("NATS connection closed.")
+		}),
 	)
-	if err != nil {
-		return err
-	}
 
-	publishChannel, err := connection.Channel()
-	if err != nil {
-		connection.Close()
-		return err
-	}
+	utils.PanicOnErr(err, "Could not connect to NATS: %v", err, true)
 
-	consumeChannel, err := connection.Channel()
-	if err != nil {
-		publishChannel.Close()
-		connection.Close()
-		return err
-	}
+	srv.natsConn = nc
 
-	err = publishChannel.ExchangeDeclare(
-		srv.myID+"_broadcast", // exchange name
-		"fanout",              // exchange type
-		false,                 // durable
-		false,                 // auto-deleted
-		false,                 // internal
-		false,                 // no-wait
-		nil,                   // arguments
-	)
-	if err != nil {
-		publishChannel.Close()
-		consumeChannel.Close()
-		connection.Close()
-		return err
-	}
-
-	if deleteOnStartup {
-		publishChannel.QueueDelete(srv.myID+"_updates", false, false, false)
-		publishChannel.QueueDelete(srv.myID+"_requests", false, false, false)
-	}
-
-	updatesQueue, err := publishChannel.QueueDeclare(
-		srv.myID+"_updates", // name
-		false,               // durable
-		false,               // delete when unused
-		false,               // exclusive
-		false,               // no-wait
-		nil,                 // arguments
-	)
-	if err != nil {
-		publishChannel.Close()
-		consumeChannel.Close()
-		connection.Close()
-		return err
-	}
-
-	requestsQueue, err := publishChannel.QueueDeclare(
-		srv.myID+"_requests", // name
-		false,                // durable
-		false,                // delete when unused
-		false,                // exclusive
-		false,                // no-wait
-		nil,                  // arguments
-	)
-	if err != nil {
-		publishChannel.Close()
-		consumeChannel.Close()
-		connection.Close()
-		return err
-	}
-
-	srv.updatesQueue = &updatesQueue
-	srv.requestsQueue = &requestsQueue
-
-	oldConnection := srv.mqConnection
-	oldPublish := srv.publishChannel
-	oldConsume := srv.consumeChannel
-
-	srv.mqConnection = connection
-	srv.publishChannel = publishChannel
-	srv.consumeChannel = consumeChannel
-
-	if oldPublish != nil {
-		oldPublish.Close()
-	}
-
-	if oldConsume != nil {
-		oldConsume.Close()
-	}
-
-	if oldConnection != nil {
-		oldConnection.Close()
-	}
-
-	return nil
-}
-
-func (srv *Server) mqConnectionWatcher() {
-	for {
-		srv.mqMutex.RLock()
-		connection := srv.mqConnection
-		srv.mqMutex.RUnlock()
-
-		if connection == nil {
-			time.Sleep(time.Second)
-			continue
-		}
-
-		closeChan := connection.NotifyClose(make(chan *amqp.Error))
-
-		err, ok := <-closeChan
-
-		if !ok {
-			continue
-		}
-
-		if !srv.IsRunning() {
-			return
-		}
-
-		fmt.Printf("RabbitMQ connection lost: %v\n", err)
-
-		srv.mqReady.Store(false)
-
-		for {
-			if !srv.IsRunning() {
-				return
-			}
-
-			err := srv.connectMQ()
-			if err == nil {
-				fmt.Println("Successfully reconnected to RabbitMQ.")
-
-				srv.mqReady.Store(true)
-
-				go srv.requestsListener()
-
-				break
-			}
-
-			fmt.Printf("Reconnect failed: %v\n", err)
-
-			time.Sleep(2 * time.Second)
-		}
-	}
+	srv.requestsListener()
 }
 
 func (srv *Server) requestsListener() {
-	srv.mqMutex.RLock()
-	channel := srv.consumeChannel
-	queueName := srv.requestsQueue.Name
-	srv.mqMutex.RUnlock()
-
-	if channel == nil {
-		return
-	}
-
-	requests, err := channel.Consume(
-		queueName, // Queue name
-		AppName,   // Consumer tag
-		true,      // Auto-ack
-		true,      // Exclusive
-		false,     // No-local
-		true,      // No-wait
-		nil,       // Additional arguments
+	_, err := srv.natsConn.Subscribe(
+		srv.requestsSubject,
+		func(msg *nats.Msg) {
+			go srv.processRequest(msg)
+		},
 	)
+
 	if err != nil {
-		if !errors.Is(err, amqp.ErrClosed) {
-			fmt.Printf("Could not start consuming requests: %v\n", err)
-		}
+		fmt.Printf("Could not subscribe to requests: %v\n", err)
 		return
-	}
-
-	for request := range requests {
-		go srv.processRequest(request)
-	}
-
-	fmt.Println("Requests listener stopped.")
-}
-
-func (srv *Server) publisher() {
-	for req := range srv.publishQueue {
-
-		for {
-			if !srv.IsRunning() {
-				return
-			}
-
-			if !srv.mqReady.Load() {
-				time.Sleep(time.Second)
-				continue
-			}
-
-			srv.mqMutex.RLock()
-			channel := srv.publishChannel
-			srv.mqMutex.RUnlock()
-
-			if channel == nil {
-				time.Sleep(time.Second)
-				continue
-			}
-
-			err := channel.Publish(
-				req.exchange,   // exchange
-				req.routingKey, // routing key
-				false,          // mandatory
-				false,          // immediate
-				amqp.Publishing{
-					ContentType: "application/json",
-					Body:        req.body,
-				},
-			)
-
-			if err != nil {
-				fmt.Printf(
-					"Failed publish to %s (route: %s): %v\n",
-					req.exchange,
-					req.routingKey,
-					err,
-				)
-
-				time.Sleep(time.Second)
-				continue
-			}
-
-			break
-		}
 	}
 }
 
@@ -964,40 +746,52 @@ func (srv *Server) sendError(routing_key string, code int, message string, extra
 	}))
 }
 
-func (srv *Server) sendResponse(routing_key string, update Data) {
-	srv.publishWithRetry("", routing_key, update)
-}
-
-func (srv *Server) sendUpdate(update Data) {
-	srv.mqMutex.RLock()
-	queue := srv.updatesQueue
-	srv.mqMutex.RUnlock()
-
-	if queue == nil {
-		return
-	}
-
-	srv.publishWithRetry("", queue.Name, update)
-}
-
-func (srv *Server) broadcast(update Data) {
-	srv.publishWithRetry(srv.broadcastExcName, "", update)
-}
-
-func (srv *Server) publishWithRetry(exchange string, routing_key string, update Data) {
+func (srv *Server) sendResponse(reply string, update Data) {
 	if !srv.IsRunning() {
 		return
 	}
 
 	body := []byte(utils.UnsafeMarshal(update))
 
-	select {
-	case srv.publishQueue <- PublishRequest{
-		exchange:   exchange,
-		routingKey: routing_key,
-		body:       body,
-	}:
-	default:
-		fmt.Println("Publish queue full, dropping message.")
+	err := srv.natsConn.Publish(reply, body)
+
+	if err != nil {
+		fmt.Printf("Failed response publish: %v\n", err)
+	}
+}
+
+func (srv *Server) sendUpdate(update Data) {
+
+	if !srv.IsRunning() {
+		return
+	}
+
+	body := []byte(utils.UnsafeMarshal(update))
+
+	err := srv.natsConn.Publish(
+		srv.updatesSubject,
+		body,
+	)
+
+	if err != nil {
+		fmt.Printf("Failed update publish: %v\n", err)
+	}
+}
+
+func (srv *Server) broadcast(update Data) {
+
+	if !srv.IsRunning() {
+		return
+	}
+
+	body := []byte(utils.UnsafeMarshal(update))
+
+	err := srv.natsConn.Publish(
+		srv.broadcastSubject,
+		body,
+	)
+
+	if err != nil {
+		fmt.Printf("Failed broadcast publish: %v\n", err)
 	}
 }
