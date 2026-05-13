@@ -114,8 +114,10 @@ func registerSignalHandler(server *srv.Server, notifyChannel chan struct{}) {
 	sigChannel := make(chan os.Signal, 1)
 	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT, syscall.SIGSEGV)
 
+	fmt.Println("Server is running. Press Ctrl+C to stop.")
 	go func() {
 		<-sigChannel
+		fmt.Println("\nShutting down server...")
 		server.Close()
 		close(notifyChannel)
 	}()

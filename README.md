@@ -1,8 +1,9 @@
 # TDLib Server
 
-**TDLib Server** is a high-performance Go server built to scale Telegram bots using [TDLib](https://github.com/tdlib/td) and [RabbitMQ](https://www.rabbitmq.com).
+**TDLib Server** is a high-performance Go server built to scale Telegram bots using [TDLib](https://github.com/tdlib/td) and [NATS](https://nats.io).
 
 ## Table of Contents
+
 - [Features](#features)
 - [Usage](#usage)
 - [Installation](#installation)
@@ -11,13 +12,16 @@
 - [License](#license)
 
 <a name="features"></a>
+
 ## Features
+
 - **Easy to Use**: Simple setup and configuration for quick integration.
 - **High Performance**: Optimized for scaling high-loaded Telegram bots.
 - **Go-Powered**: Built with Go for concurrency and speed.
-- **RabbitMQ Integration**: Seamless integration with RabbitMQ for efficient asynchronous message handling.
+- **NATS Integration**: Fast and lightweight messaging with NATS for efficient asynchronous communication.
 
 <a name="usage"></a>
+
 ## Usage
 
 Here’s an example of how you can use [Pytdbot](https://github.com/pytdbot/client) to interact with **TDLib Server**:
@@ -35,7 +39,7 @@ logging.basicConfig(
 
 client = Client(
     token="508903:AAGyYP5y63ihh_7KFX9aNiaHfajAmcAA",
-    rabbitmq_url="amqp://username:password@0.0.0.0:5672/",  # RabbitMQ URL
+    nats_url="nats://127.0.0.1:4222",  # NATS server URL
 )
 
 
@@ -48,66 +52,85 @@ async def say_hello(c: Client, message: Message):
 
         await msg.edit_text("Boo! 👻 Just kidding.")
 
-client.run()
+asyncio.run(client.run())
 ```
 
 <a name="installation"></a>
+
 ## Installation
+
 Follow these steps to set up and build **TDLib Server** on your system.
 
 ### Requirements
+
 - **Go >= 1.21**
 - **[TDLib](https://github.com/tdlib/td#building)**
-- **[RabbitMQ](https://www.rabbitmq.com/docs/download)**
+- **[NATS Server](https://docs.nats.io/running-a-nats-service/introduction/installation)**
 
-Once TDLib and RabbitMQ are installed, you're ready to build **TDLib Server**:
+Once TDLib and NATS are installed, you're ready to build **TDLib Server**:
 
 - Clone the repository
+
     ```bash
     git clone https://github.com/pytdbot/tdlib-server
     cd tdlib-server
     ```
 
 - Build TDLib Server
-    - If **TDLib is not installed system-wide** (a.k.a ``/usr/local``):
+    - If **TDLib is not installed system-wide** (a.k.a `/usr/local`):
+
         ```bash
         TDLIB_DIR="/path/to/tdlib" make build
         ```
-        Ensure you adjust the paths to match your installation directories.
-        By default TDLib install files at ``td/tdlib``
 
-    - If **TDLib is installed system-wide** (recommended), just do:
+        Ensure you adjust the paths to match your installation directories.
+
+        By default, TDLib installs files at `td/tdlib`.
+
+    - If **TDLib is installed system-wide** (recommended), just run:
+
         ```bash
         make build
         ```
 
-    - Optionally, you can install ``tdlib-server`` system-wide:
+    - Optionally, you can install `tdlib-server` system-wide:
         ```bash
         make install
         ```
-- Run the server:
-  ```bash
-  tdlib-server --config config.ini
-  ```
+
+- Run NATS Server:
+
+    ```bash
+    nats-server -a 127.0.0.1
+    ```
+
+- Run TDLib Server:
+    ```bash
+    tdlib-server --config config.ini
+    ```
 
 <a name="configuration"></a>
+
 ## Configuration
 
 All configuration options can be found in [config.ini](config.ini).
 
-You can also view the available cli options by running:
+You can also view the available CLI options by running:
 
 ```bash
 tdlib-server --help
 ```
 
 <a name="acknowledgments"></a>
+
 ## Acknowledgments
+
 - Thank you for taking the time to view or use this project.
 
 - Special thanks to [@levlam](https://github.com/levlam) for maintaining [TDLib](https://github.com/tdlib/td) and for his support in creating [TDLib Server](https://github.com/pytdbot/tdlib-server).
 
-
 <a name="license"></a>
+
 ## License
+
 This project is licensed under the [MIT License](LICENSE).
