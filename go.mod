@@ -6,7 +6,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.3.0
 	github.com/bytedance/sonic v1.15.1
 	github.com/cheggaaa/pb/v3 v3.1.7
-	github.com/mattn/go-sqlite3 v1.14.28
+	github.com/mattn/go-sqlite3 v1.14.44
 	github.com/nats-io/nats.go v1.52.0
 	github.com/urfave/cli/v2 v2.27.4
 	gopkg.in/ini.v1 v1.67.0
