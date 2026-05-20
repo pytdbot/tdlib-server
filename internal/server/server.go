@@ -207,7 +207,7 @@ func (srv *Server) Start() {
 // AuthorizationState returns the currant authorization state of the Server.
 func (srv *Server) AuthorizationState() Data {
 	srv.stateMu.RLock()
-	defer srv.stateMu.Unlock()
+	defer srv.stateMu.RUnlock()
 
 	return srv.authState
 }
@@ -215,7 +215,7 @@ func (srv *Server) AuthorizationState() Data {
 // ConnectionState returns the current connection state of the Server.
 func (srv *Server) ConnectionState() Data {
 	srv.stateMu.RLock()
-	defer srv.stateMu.Unlock()
+	defer srv.stateMu.RUnlock()
 
 	return srv.connectionState
 }
@@ -223,7 +223,7 @@ func (srv *Server) ConnectionState() Data {
 // Options returns the current options of the Server.
 func (srv *Server) Options() Data {
 	srv.stateMu.RLock()
-	defer srv.stateMu.Unlock()
+	defer srv.stateMu.RUnlock()
 
 	return srv.options
 }
