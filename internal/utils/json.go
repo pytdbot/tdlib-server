@@ -90,3 +90,41 @@ func UnsafeUnmarshal(input string) map[string]interface{} {
 
 	return result
 }
+
+// UnsafeMarshalBytes encodes the provided map[string]interface{} input into a JSON byte slice.
+//
+// If an error occurs during encoding, it prints the error and returns nil.
+func UnsafeMarshalBytes(input map[string]interface{}) []byte {
+	jsonData, err := json.Marshal(input)
+	if err != nil {
+		fmt.Println("error encoding JSON:", err)
+		return nil
+	}
+
+	return jsonData
+}
+
+// UnmarshalBytes decodes the input JSON byte slice into a map[string]interface{}.
+//
+// If an error occurs during decoding, it returns nil and the error.
+func UnmarshalBytes(input []byte) (map[string]interface{}, error) {
+	var result map[string]interface{}
+	if err := json.Unmarshal(input, &result); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// UnsafeUnmarshalBytes decodes the input JSON byte slice into a map[string]interface{}.
+//
+// If an error occurs during decoding, it prints the error and returns nil.
+func UnsafeUnmarshalBytes(input []byte) map[string]interface{} {
+	var result map[string]interface{}
+	if err := json.Unmarshal(input, &result); err != nil {
+		fmt.Printf("error decoding JSON: %v", err)
+		return nil
+	}
+
+	return result
+}
