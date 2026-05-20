@@ -4,6 +4,8 @@ package tdjson
 import "C"
 
 import (
+	"unsafe"
+
 	"github.com/pytdbot/tdlib-server/internal/utils"
 )
 
@@ -48,7 +50,9 @@ func NewTdJson(create_client bool, verbosity int, log_file string) *TdJson {
 
 // Send sends request to the TDLib client.
 func (td *TdJson) Send(request string) {
-	C.td_send(td.ClientID, C.CString(request))
+	cstr := C.CString(request)
+	C.td_send(td.ClientID, cstr)
+	C.free(unsafe.Pointer(cstr))
 }
 
 // Receive receives incoming updates and request responses
@@ -64,7 +68,9 @@ func (td *TdJson) Receive(timeout float32) string {
 
 // Execute synchronously executes a TDLib request.
 func (td *TdJson) Execute(request string) string {
-	res := C.td_execute(C.CString(request))
+	cstr := C.CString(request)
+	res := C.td_execute(cstr)
+	C.free(unsafe.Pointer(cstr))
 
 	if res == nil {
 		return ""
