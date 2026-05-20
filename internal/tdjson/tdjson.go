@@ -1,6 +1,7 @@
 package tdjson
 
 // #include <stdlib.h>
+// #include <string.h>
 // #include <td/telegram/td_json_client.h>
 import "C"
 
