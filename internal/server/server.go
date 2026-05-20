@@ -329,13 +329,13 @@ func (srv *Server) processRequest(r *nats.Msg) {
 	switch utils.Type(request) {
 	case "close":
 		srv.handleCloseRequest(r, extra) // ignore close requests; returns OK immediately
-	case "getcurrentstate":
+	case "getCurrentState":
 		srv.handleGetCurrentStateRequest(r, extra)
-	case "getserverstats":
+	case "getServerStats":
 		srv.handleGetServerStatsRequest(r, extra)
-	case "scheduleevent":
+	case "scheduleEvent":
 		srv.handleScheduleEventRequest(r, request, extra)
-	case "cancelscheduledevent":
+	case "cancelScheduledEvent":
 		srv.handleCancelScheduledEventRequest(r, request, extra)
 	default:
 		select {
