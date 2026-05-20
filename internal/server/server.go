@@ -109,6 +109,9 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 			},
 		),
 	)))
+	if tdRequestsInitValue == nil {
+		utils.PanicOnErr(false, "Failed to get td_requests log tag verbosity level", nil, true)
+	}
 
 	return &Server{
 		config:    cfg,
