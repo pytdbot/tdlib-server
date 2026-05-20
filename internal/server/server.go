@@ -231,7 +231,7 @@ func (srv *Server) Options() Data {
 // Invoke sends a request to TDlib and returns the response data
 // along with a boolean indicating whether the request was successful.
 func (srv *Server) Invoke(request Data) (Data, bool) {
-	request_id := strconv.Itoa(srv.requestID.GenerateID())
+	request_id := strconv.FormatInt(srv.requestID.GenerateID(), 10)
 
 	request["@extra"] = make(Data)
 	request["@extra"].(Data)["request_id"] = request_id
