@@ -80,7 +80,11 @@ func (sched *Scheduler) Close() error {
 	sched.mu.Lock()
 	defer sched.mu.Unlock()
 
-	close(sched.stopChan)
+	select {
+	case <-sched.stopChan:
+	default:
+		close(sched.stopChan)
+	}
 
 	sched.create_stmt.Close()
 	return sched.db.Close()
