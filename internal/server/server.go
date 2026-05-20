@@ -714,11 +714,9 @@ func (srv *Server) startNATS() {
 
 	url := cfg.Key("url").MustString(nats.DefaultURL)
 
-	nc, err := nats.Connect(
-		url,
-
+	opts := []nats.Option{
 		nats.MaxReconnects(-1),
-		nats.ReconnectWait(2*time.Second),
+		nats.ReconnectWait(2 * time.Second),
 
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			fmt.Printf("NATS disconnected: %v\n", err)
@@ -731,7 +729,19 @@ func (srv *Server) startNATS() {
 		nats.ClosedHandler(func(nc *nats.Conn) {
 			fmt.Println("NATS connection closed.")
 		}),
-	)
+	}
+
+	if token := os.Getenv("NATS_TOKEN"); token != "" {
+		opts = append(opts, nats.Token(token))
+	} else if token := cfg.Key("token").String(); token != "" {
+		opts = append(opts, nats.Token(token))
+	}
+
+	if cfg.Key("tls").MustBool(false) {
+		opts = append(opts, nats.Secure())
+	}
+
+	nc, err := nats.Connect(url, opts...)
 
 	utils.PanicOnErr(err, "Could not connect to NATS: %v", err, true)
 
