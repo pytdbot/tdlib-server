@@ -1,6 +1,9 @@
 package utils
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 // SafeResultsMap is a thread-safe map for managing channels
 // associated with TDLib responses to requests.
@@ -62,6 +65,7 @@ func (srm *SafeResultsMap) SafeSend(
 	select {
 	case ch <- value:
 	default:
+		fmt.Println("SafeSend: channel full, discarding value")
 	}
 }
 
