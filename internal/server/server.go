@@ -473,7 +473,7 @@ func (srv *Server) sendScheduledEvent(name string, event_id int64, payload strin
 }
 
 func (srv *Server) getCurrentState() Data {
-	updateSlice := make([]Data, 0, len(srv.options)+2)
+	updateSlice := make([]Data, 0, len(srv.options)+2) // 2+ -> authorizationState + connectionState
 
 	for k, v := range srv.options {
 		updateSlice = append(updateSlice, Data{
