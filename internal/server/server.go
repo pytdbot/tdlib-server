@@ -627,15 +627,25 @@ func (srv *Server) handleUpdateConnectionState(connectionState Data) {
 }
 
 func (srv *Server) handleUpdateOption(option Data) {
+	name, ok := option["name"].(string)
+	if !ok {
+		return
+	}
+
 	srv.stateMu.Lock()
-	srv.options[option["name"].(string)] = option["value"]
+	srv.options[name] = option["value"]
 	srv.stateMu.Unlock()
 
 	srv.broadcast(option)
 }
 
 func (srv *Server) handleUpdateUser(user Data) {
-	if utils.AsMap(user["user"])["id"].(int64) == srv.myIDInt {
+	userData := utils.AsMap(user["user"])
+	id, ok := userData["id"].(int64)
+	if !ok {
+		return
+	}
+	if id == srv.myIDInt {
 		srv.broadcast(user)
 	} else {
 		srv.sendUpdate(user)

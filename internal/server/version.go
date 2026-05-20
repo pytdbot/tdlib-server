@@ -23,7 +23,12 @@ func init() {
 		),
 	)))
 
-	currant_version, _ := semver.NewVersion(res_version["value"].(string))
+	value, ok := res_version["value"].(string)
+	if !ok {
+		utils.PanicOnErr(false, "Failed to get TDLib version from response", nil, true)
+	}
+
+	currant_version, _ := semver.NewVersion(value)
 
 	minimum_version, _ := semver.NewVersion(MINIMUM_TDLIB_VERSION)
 
