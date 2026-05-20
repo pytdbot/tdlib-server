@@ -10,22 +10,22 @@ import (
 	"github.com/pytdbot/tdlib-server/internal/utils"
 )
 
-type TdJson struct {
+type TDJSON struct {
 	ClientID C.int
 }
 
-// New initializes a new TdJson instance and sets the log verbosity level.
-func NewTdJson(create_client bool, verbosity int, log_file string) *TdJson {
-	instance := TdJson{}
+// New initializes a new TDJSON instance and sets the log verbosity level.
+func New(createClient bool, verbosity int, logFile string) *TDJSON {
+	instance := TDJSON{}
 
-	if create_client {
-		if log_file != "" {
+	if createClient {
+		if logFile != "" {
 			instance.Execute(utils.UnsafeMarshal(
 				utils.MakeObject(
 					"setLogStream",
 					utils.Params{
 						"log_stream": utils.MakeObject("logStreamFile", utils.Params{
-							"path":            log_file,
+							"path":            logFile,
 							"max_file_size":   104857600, // 100MB
 							"redirect_stderr": false,
 						}),
@@ -50,14 +50,14 @@ func NewTdJson(create_client bool, verbosity int, log_file string) *TdJson {
 }
 
 // Send sends request to the TDLib client.
-func (td *TdJson) Send(request string) {
+func (td *TDJSON) Send(request string) {
 	cstr := C.CString(request)
 	C.td_send(td.ClientID, cstr)
 	C.free(unsafe.Pointer(cstr))
 }
 
 // Receive receives incoming updates and request responses
-func (td *TdJson) Receive(timeout float32) string {
+func (td *TDJSON) Receive(timeout float32) string {
 	res := C.td_receive(C.double(timeout))
 
 	if res == nil {
@@ -68,7 +68,7 @@ func (td *TdJson) Receive(timeout float32) string {
 }
 
 // Execute synchronously executes a TDLib request.
-func (td *TdJson) Execute(request string) string {
+func (td *TDJSON) Execute(request string) string {
 	cstr := C.CString(request)
 	res := C.td_execute(cstr)
 	C.free(unsafe.Pointer(cstr))
@@ -82,7 +82,7 @@ func (td *TdJson) Execute(request string) string {
 
 // ReceiveBytes receives incoming updates and request responses as a byte slice,
 // avoiding the C.GoString→[]byte roundtrip when the result is immediately unmarshalled.
-func (td *TdJson) ReceiveBytes(timeout float32) []byte {
+func (td *TDJSON) ReceiveBytes(timeout float32) []byte {
 	res := C.td_receive(C.double(timeout))
 
 	if res == nil {

@@ -31,7 +31,7 @@ OPTIONS:{{template "visibleFlagCategoryTemplate" .}}
 `
 
 	cli.VersionPrinter = func(cCtx *cli.Context) {
-		fmt.Printf("TDLib Server v%s (TDLib v%s)\n", cCtx.App.Version, srv.TDLIB_VERSION)
+		fmt.Printf("TDLib Server v%s (TDLib v%s)\n", cCtx.App.Version, srv.TDLibVersion)
 	}
 
 	app := createCLIApp()
