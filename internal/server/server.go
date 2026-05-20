@@ -114,7 +114,9 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		utils.PanicOnErr(false, "Could not convert bot ID to int", nil, true)
 	}
 
-	td := tdjson.NewTdJson(true, td_verbosity_level, log_file)
+	logFilePath := filepath.Clean(log_file)
+
+	td := tdjson.NewTdJson(true, td_verbosity_level, logFilePath)
 
 	tdRequestsInitValue := utils.UnsafeUnmarshal(td.Execute(utils.UnsafeMarshal(
 		utils.MakeObject(
@@ -271,7 +273,7 @@ func (srv *Server) Invoke(request Data) (Data, bool) {
 
 func (srv *Server) processUpdate(update Data) {
 	if srv.isDebug {
-		fmt.Println("Received:", utils.UnsafeMarshalWithIndent(update))
+		fmt.Println("Received:", utils.UnsafeMarshalWithIndent(redactSecrets(update)))
 	}
 
 	if extra, exists := update["@extra"]; exists { // it's a response
@@ -534,9 +536,28 @@ func (srv *Server) DisableRequestsDebug() {
 
 func (srv *Server) send(request Data) {
 	srv.td.Send(utils.UnsafeMarshal(request))
+
 	if srv.isDebug {
-		fmt.Println("Sent:", utils.UnsafeMarshalWithIndent(request))
+		fmt.Println("Sent:", utils.UnsafeMarshalWithIndent(redactSecrets(request)))
 	}
+}
+
+var redactFields = map[string]bool{
+	"api_hash":                true,
+	"database_encryption_key": true,
+	"token":                   true,
+}
+
+func redactSecrets(data Data) Data {
+	redacted := make(Data, len(data))
+	for k, v := range data {
+		if redactFields[k] {
+			redacted[k] = "[REDACTED]"
+		} else {
+			redacted[k] = v
+		}
+	}
+	return redacted
 }
 
 func (srv *Server) setIsRunning(is_running bool) {
