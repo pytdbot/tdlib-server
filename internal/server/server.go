@@ -193,17 +193,22 @@ func (srv *Server) Close() (bool, error) {
 	srv.scheduler.Close()
 
 	if srv.natsConn != nil {
-		err := srv.natsConn.Drain()
-
-		if err != nil {
-			fmt.Printf("NATS drain error: %v\n", err)
+		drainDone := make(chan struct{})
+		go func() {
+			srv.natsConn.Drain()
+			close(drainDone)
+		}()
+		select {
+		case <-drainDone:
+		case <-time.After(5 * time.Second):
+			fmt.Println("NATS drain timed out")
 		}
 
 		srv.natsConn.Close()
 	}
 
 	if shouldPanic {
-		panic("TDLib did not close in time")
+		return false, fmt.Errorf("TDLib did not close in time")
 	}
 
 	return true, nil
@@ -284,6 +289,12 @@ func (srv *Server) Invoke(request Data) (Data, bool) {
 		}
 
 		return response, true
+
+	case <-time.After(srv.requestTimeout):
+
+		srv.results.Delete(request_id)
+
+		return utils.MakeError(500, "Request timed out"), false
 
 	case <-srv.waitForClosed:
 
@@ -744,7 +755,8 @@ func (srv *Server) startNATS() {
 	nc, err := nats.Connect(
 		url,
 
-		nats.MaxReconnects(-1),
+		nats.Timeout(10*time.Second),
+		nats.MaxReconnects(100),
 		nats.ReconnectWait(2*time.Second),
 
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
@@ -804,6 +816,7 @@ func (srv *Server) sendResponse(reply string, update Data) {
 
 	if err != nil {
 		fmt.Printf("Failed response publish: %v\n", err)
+		srv.publishDropped.Add(1)
 	}
 }
 
@@ -822,6 +835,7 @@ func (srv *Server) sendUpdate(update Data) {
 
 	if err != nil {
 		fmt.Printf("Failed update publish: %v\n", err)
+		srv.publishDropped.Add(1)
 	}
 }
 
@@ -840,5 +854,6 @@ func (srv *Server) broadcast(update Data) {
 
 	if err != nil {
 		fmt.Printf("Failed broadcast publish: %v\n", err)
+		srv.publishDropped.Add(1)
 	}
 }

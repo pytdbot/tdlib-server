@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	srv "github.com/pytdbot/tdlib-server/internal/server"
 	"github.com/pytdbot/tdlib-server/internal/utils"
@@ -112,7 +113,7 @@ func runServer(c *cli.Context) error {
 
 func registerSignalHandler(server *srv.Server, notifyChannel chan struct{}) {
 	sigChannel := make(chan os.Signal, 1)
-	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT, syscall.SIGSEGV)
+	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT)
 
 	fmt.Println("Server is running. Press Ctrl+C to stop.")
 	go func() {
@@ -139,12 +140,14 @@ func updateServer(c *cli.Context) error {
 		return fmt.Errorf("failed to get current executable path: %v", err)
 	}
 
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+
 	currentHash, err := calculateFileSHA256(execPath)
 	if err != nil {
 		return fmt.Errorf("failed to calculate current binary hash: %v", err)
 	}
 
-	resp, err := http.Get("https://api.github.com/repos/pytdbot/tdlib-server/releases/latest")
+	resp, err := httpClient.Get("https://api.github.com/repos/pytdbot/tdlib-server/releases/latest")
 	if err != nil {
 		return fmt.Errorf("failed to check for updates: %v", err)
 	}
@@ -192,7 +195,7 @@ func updateServer(c *cli.Context) error {
 	defer os.Remove(tempFile)
 
 	fmt.Printf("Downloading update from %s...\n", downloadURL)
-	resp, err = http.Get(downloadURL)
+	resp, err = httpClient.Get(downloadURL)
 	if err != nil {
 		return fmt.Errorf("failed to download update: %v", err)
 	}
