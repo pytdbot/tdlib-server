@@ -29,8 +29,8 @@ type PublishRequest struct {
 
 type Server struct {
 	config    *ini.File
-	td        *tdjson.TdJson
-	requestID *utils.IdGenerator
+	td        *tdjson.TDJSON
+	requestID *utils.IDGenerator
 
 	authState       Data
 	connectionState Data
@@ -99,7 +99,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		utils.PanicOnErr(false, "Could not convert bot ID to int", nil, true)
 	}
 
-	td := tdjson.NewTdJson(true, td_verbosity_level, log_file)
+	td := tdjson.New(true, td_verbosity_level, log_file)
 
 	tdRequestsInitValue := utils.UnsafeUnmarshal(td.Execute(utils.UnsafeMarshal(
 		utils.MakeObject(
@@ -113,7 +113,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 	return &Server{
 		config:    cfg,
 		td:        td,
-		requestID: utils.NewIdGenerator(),
+		requestID: utils.NewIDGenerator(),
 		results:   utils.NewSafeResultsMap(),
 
 		updatesSubject:   "bot." + myID + ".updates",
