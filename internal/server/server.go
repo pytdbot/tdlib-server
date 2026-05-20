@@ -67,10 +67,7 @@ type Server struct {
 	databaseDirectory string
 	requestTimeout    time.Duration
 
-	updateWorkers  chan Data
-	requestWorkers chan *nats.Msg
-	wg             sync.WaitGroup
-	listenerDone   chan struct{}
+	listenerDone chan struct{}
 
 	publishDropped atomic.Int64
 }
@@ -184,10 +181,6 @@ func (srv *Server) Close() (bool, error) {
 	srv.setIsRunning(false)
 	<-srv.listenerDone
 
-	close(srv.updateWorkers)
-	close(srv.requestWorkers)
-	srv.wg.Wait()
-
 	srv.results.Clear()
 
 	srv.scheduler.Close()
@@ -216,26 +209,6 @@ func (srv *Server) Start() {
 	srv.scheduler = utils.NewScheduler(srv.databaseDirectory, srv.sendScheduledEvent)
 	srv.scheduler.Start()
 
-	n := runtime.NumCPU()
-	srv.updateWorkers = make(chan Data, 4096)
-	srv.requestWorkers = make(chan *nats.Msg, 4096)
-
-	srv.wg.Add(n * 2)
-	for i := 0; i < n; i++ {
-		go func() {
-			defer srv.wg.Done()
-			for update := range srv.updateWorkers {
-				srv.processUpdate(update)
-			}
-		}()
-		go func() {
-			defer srv.wg.Done()
-			for msg := range srv.requestWorkers {
-				srv.processRequest(msg)
-			}
-		}()
-	}
-
 	go srv.Invoke(utils.MakeObject("getOption", utils.Params{"name": "version"}))
 	go srv.tdListener()
 }
@@ -243,7 +216,7 @@ func (srv *Server) Start() {
 // AuthorizationState returns the currant authorization state of the Server.
 func (srv *Server) AuthorizationState() Data {
 	srv.stateMu.RLock()
-	defer srv.stateMu.Unlock()
+	defer srv.stateMu.RUnlock()
 
 	return srv.authState
 }
@@ -251,7 +224,7 @@ func (srv *Server) AuthorizationState() Data {
 // ConnectionState returns the current connection state of the Server.
 func (srv *Server) ConnectionState() Data {
 	srv.stateMu.RLock()
-	defer srv.stateMu.Unlock()
+	defer srv.stateMu.RUnlock()
 
 	return srv.connectionState
 }
@@ -259,7 +232,7 @@ func (srv *Server) ConnectionState() Data {
 // Options returns the current options of the Server.
 func (srv *Server) Options() Data {
 	srv.stateMu.RLock()
-	defer srv.stateMu.Unlock()
+	defer srv.stateMu.RUnlock()
 
 	return srv.options
 }
@@ -267,7 +240,7 @@ func (srv *Server) Options() Data {
 // Invoke sends a request to TDlib and returns the response data
 // along with a boolean indicating whether the request was successful.
 func (srv *Server) Invoke(request Data) (Data, bool) {
-	request_id := strconv.Itoa(srv.requestID.GenerateID())
+	request_id := strconv.FormatInt(srv.requestID.GenerateID(), 10)
 
 	request["@extra"] = Data{"request_id": request_id}
 
@@ -728,11 +701,7 @@ func (srv *Server) tdListener() {
 
 		update := utils.UnsafeUnmarshal(res)
 
-		if _, isResponse := update["@extra"]; isResponse {
-			srv.processUpdate(update)
-		} else {
-			srv.updateWorkers <- update
-		}
+		go srv.processUpdate(update)
 	}
 }
 
@@ -771,10 +740,7 @@ func (srv *Server) requestsListener() {
 	_, err := srv.natsConn.Subscribe(
 		srv.requestsSubject,
 		func(msg *nats.Msg) {
-			select {
-			case srv.requestWorkers <- msg:
-			default:
-			}
+			go srv.processRequest(msg)
 		},
 	)
 
