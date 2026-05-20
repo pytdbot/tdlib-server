@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go"
 
 	"gopkg.in/ini.v1"
 
@@ -55,12 +55,12 @@ type Server struct {
 
 	scheduler *utils.Scheduler
 
-	results         *utils.SafeResultsMap
-	broadcast_types map[string]struct{}
+	results        *utils.SafeResultsMap
+	broadcastTypes map[string]struct{}
 
-	updates_count  atomic.Int64
-	requests_count atomic.Int64
-	uptime         time.Time
+	updatesCount  atomic.Int64
+	requestsCount atomic.Int64
+	uptime        time.Time
 
 	closeTimeout time.Duration
 }
@@ -68,11 +68,11 @@ type Server struct {
 // New creates and initializes a new Server instance with the specified verbosity level
 // and configuration file path. It returns a pointer to the Server and an error if the
 // initialization fails.
-func New(td_verbosity_level int, config_path string, log_file string, debug bool) (*Server, error) {
-	cfg, err := ini.Load(config_path)
+func New(tdVerbosityLevel int, configPath string, logFile string, debug bool) (*Server, error) {
+	cfg, err := ini.Load(configPath)
 
 	if err != nil {
-		return nil, fmt.Errorf("fail to read configuration file "+config_path+": %v", err)
+		return nil, fmt.Errorf("fail to read configuration file "+configPath+": %v", err)
 	}
 
 	closeTimeoutSeconds, err := cfg.Section("server").Key("close_timeout").Int()
@@ -80,7 +80,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		closeTimeoutSeconds = 0
 	}
 
-	listRaw := strings.Split(cfg.Section("server").Key("broadcast_types").String(), ",")
+	listRaw := strings.Split(cfg.Section("server").Key("broadcastTypes").String(), ",")
 
 	mapOfTypes := make(map[string]struct{})
 	for _, val := range listRaw {
@@ -99,7 +99,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		utils.PanicOnErr(false, "Could not convert bot ID to int", nil, true)
 	}
 
-	td := tdjson.New(true, td_verbosity_level, log_file)
+	td := tdjson.New(true, tdVerbosityLevel, logFile)
 
 	tdRequestsInitValue := utils.UnsafeUnmarshal(td.Execute(utils.UnsafeMarshal(
 		utils.MakeObject(
@@ -124,10 +124,10 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		myID:                myID,
 		myIDInt:             int64(myIDInt),
 		isDebug:             debug,
-		tdRequestsInitValue: tdRequestsInitValue["verbosity_level"].(int64),
+		tdRequestsInitValue: tdRequestsInitValue["verbosityLevel"].(int64),
 		waitForReady:        make(chan struct{}),
 		waitForClosed:       make(chan struct{}),
-		broadcast_types:     mapOfTypes,
+		broadcastTypes:      mapOfTypes,
 		closeTimeout:        time.Duration(closeTimeoutSeconds) * time.Second,
 	}, nil
 }
@@ -228,12 +228,12 @@ func (srv *Server) Options() Data {
 // Invoke sends a request to TDlib and returns the response data
 // along with a boolean indicating whether the request was successful.
 func (srv *Server) Invoke(request Data) (Data, bool) {
-	request_id := strconv.Itoa(srv.requestID.GenerateID())
+	requestID := strconv.Itoa(srv.requestID.GenerateID())
 
 	request["@extra"] = make(Data)
-	request["@extra"].(Data)["request_id"] = request_id
+	request["@extra"].(Data)["requestID"] = requestID
 
-	channel := srv.results.Make(request_id)
+	channel := srv.results.Make(requestID)
 
 	srv.send(request)
 
@@ -249,7 +249,7 @@ func (srv *Server) Invoke(request Data) (Data, bool) {
 
 	case <-srv.waitForClosed:
 
-		srv.results.Delete(request_id)
+		srv.results.Delete(requestID)
 
 		return utils.MakeError(500, "TDLib closed"), false
 	}
@@ -261,15 +261,15 @@ func (srv *Server) processUpdate(update Data) {
 	}
 
 	if extra, exists := update["@extra"]; exists { // it's a response
-		srv.requests_count.Add(1)
+		srv.requestsCount.Add(1)
 
 		extraMap := utils.AsMap(extra)
 
-		if routingKey, exists := extraMap["routing_key"]; exists {
-			delete(extraMap, "routing_key")
+		if routingKey, exists := extraMap["routingKey"]; exists {
+			delete(extraMap, "routingKey")
 			srv.sendResponse(routingKey.(string), update)
 		} else { // local request
-			if requestID, ok := extraMap["request_id"].(string); ok {
+			if requestID, ok := extraMap["requestID"].(string); ok {
 				if channel, found := srv.results.Get(requestID); found {
 					srv.results.SafeSend(channel, update)
 					srv.results.Delete(requestID)
@@ -277,11 +277,11 @@ func (srv *Server) processUpdate(update Data) {
 			}
 		}
 	} else { // it's an update
-		srv.updates_count.Add(1)
+		srv.updatesCount.Add(1)
 
-		update_type := utils.Type(update)
+		updateType := utils.Type(update)
 
-		switch update_type {
+		switch updateType {
 
 		case "updateOption":
 			srv.handleUpdateOption(update)
@@ -292,7 +292,7 @@ func (srv *Server) processUpdate(update Data) {
 		case "updateUser":
 			srv.handleUpdateUser(update)
 		default:
-			if _, exists := srv.broadcast_types[update_type]; exists {
+			if _, exists := srv.broadcastTypes[updateType]; exists {
 				srv.broadcast(update)
 			} else {
 				srv.sendUpdate(update)
@@ -330,7 +330,7 @@ func (srv *Server) processRequest(r *nats.Msg) {
 		srv.handleCancelScheduledEventRequest(r, request, extra)
 	default:
 		<-srv.waitForReady
-		extra["routing_key"] = r.Reply
+		extra["routingKey"] = r.Reply
 		srv.send(request)
 	}
 }
@@ -401,7 +401,7 @@ func (srv *Server) handleScheduleEventRequest(r *nats.Msg, request Data, extra D
 	}
 
 	srv.sendResponse(r.Reply, utils.MakeObject("scheduledEvent", utils.Params{
-		"event_id":   eventID,
+		"eventID":    eventID,
 		"send_at":    sendAt,
 		"@extra":     extra,
 		"@client_id": srv.td.ClientID,
@@ -409,9 +409,9 @@ func (srv *Server) handleScheduleEventRequest(r *nats.Msg, request Data, extra D
 }
 
 func (srv *Server) handleCancelScheduledEventRequest(r *nats.Msg, request Data, extra Data) {
-	rawID, ok := request["event_id"]
+	rawID, ok := request["eventID"]
 	if !ok {
-		srv.sendError(r.Reply, 400, "event_id is required", extra)
+		srv.sendError(r.Reply, 400, "eventID is required", extra)
 		return
 	}
 
@@ -424,7 +424,7 @@ func (srv *Server) handleCancelScheduledEventRequest(r *nats.Msg, request Data, 
 	case int64:
 		eventID = v
 	default:
-		srv.sendError(r.Reply, 400, "event_id must be an integer", extra)
+		srv.sendError(r.Reply, 400, "eventID must be an integer", extra)
 		return
 	}
 
@@ -440,12 +440,12 @@ func (srv *Server) handleCancelScheduledEventRequest(r *nats.Msg, request Data, 
 	srv.sendResponse(r.Reply, utils.MakeObject("ok", utils.Params{"@extra": extra, "@client_id": srv.td.ClientID}))
 }
 
-func (srv *Server) sendScheduledEvent(name string, event_id int64, payload string) {
+func (srv *Server) sendScheduledEvent(name string, eventID int64, payload string) {
 	<-srv.waitForReady
 
 	srv.sendUpdate(utils.MakeObject("updateScheduledEvent", utils.Params{
 		"name":       name,
-		"event_id":   event_id,
+		"eventID":    eventID,
 		"payload":    payload,
 		"@client_id": srv.td.ClientID,
 	}))
@@ -475,11 +475,11 @@ func (srv *Server) getCurrentState() Data {
 
 func (srv *Server) getStats() Data {
 	return Data{
-		"@type":          "serverStats",
-		"my_id":          srv.myIDInt,
-		"uptime":         time.Since(srv.uptime).Seconds(),
-		"updates_count":  srv.updates_count.Load(),
-		"requests_count": srv.requests_count.Load(),
+		"@type":         "serverStats",
+		"my_id":         srv.myIDInt,
+		"uptime":        time.Since(srv.uptime).Seconds(),
+		"updatesCount":  srv.updatesCount.Load(),
+		"requestsCount": srv.requestsCount.Load(),
 	}
 }
 
@@ -491,13 +491,13 @@ func (srv *Server) getFakeUpdateAuthClosed() Data {
 	return Data{"@type": "updateAuthorizationState", "authorization_state": Data{"@type": "authorizationStateClosed"}, "@client_id": srv.td.ClientID}
 }
 
-func (srv *Server) EnableRequestsDebug(verbosity_level int) {
+func (srv *Server) EnableRequestsDebug(verbosityLevel int) {
 	srv.td.Execute(utils.UnsafeMarshal(
 		utils.MakeObject(
 			"setLogTagVerbosityLevel",
 			utils.Params{
-				"tag":                 "td_requests",
-				"new_verbosity_level": verbosity_level,
+				"tag":                "td_requests",
+				"new_verbosityLevel": verbosityLevel,
 			},
 		),
 	))
@@ -508,8 +508,8 @@ func (srv *Server) DisableRequestsDebug() {
 		utils.MakeObject(
 			"setLogTagVerbosityLevel",
 			utils.Params{
-				"tag":                 "td_requests",
-				"new_verbosity_level": srv.tdRequestsInitValue,
+				"tag":                "td_requests",
+				"new_verbosityLevel": srv.tdRequestsInitValue,
 			},
 		),
 	))
@@ -522,8 +522,8 @@ func (srv *Server) send(request Data) {
 	}
 }
 
-func (srv *Server) setIsRunning(is_running bool) {
-	srv.isRunning.Store(is_running)
+func (srv *Server) setIsRunning(isRunning bool) {
+	srv.isRunning.Store(isRunning)
 }
 
 // IsRunning returns a boolean indicating whether the Server is currently running.
@@ -545,19 +545,19 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 
 	if state == "authorizationStateWaitTdlibParameters" {
 
-		srv_config := srv.config.Section("server")
+		srvConfig := srv.config.Section("server")
 
-		use_test_dc, err := srv_config.Key("use_test_dc").Bool()
-		utils.PanicOnErr(err, "Invalid use_test_dc: %v", err, true)
+		useTestDC, err := srvConfig.Key("useTestDC").Bool()
+		utils.PanicOnErr(err, "Invalid useTestDC: %v", err, true)
 
-		use_file_database, err := srv_config.Key("use_file_database").Bool()
-		utils.PanicOnErr(err, "Invalid use_file_database: %v", err, true)
+		useFileDatabase, err := srvConfig.Key("useFileDatabase").Bool()
+		utils.PanicOnErr(err, "Invalid useFileDatabase: %v", err, true)
 
-		use_chat_info_database, err := srv_config.Key("use_chat_info_database").Bool()
-		utils.PanicOnErr(err, "Invalid use_chat_info_database: %v", err, true)
+		useChatInfoDatabase, err := srvConfig.Key("useChatInfoDatabase").Bool()
+		utils.PanicOnErr(err, "Invalid useChatInfoDatabase: %v", err, true)
 
-		use_message_database, err := srv_config.Key("use_message_database").Bool()
-		utils.PanicOnErr(err, "Invalid use_message_database: %v", err, true)
+		useMessageDatabase, err := srvConfig.Key("useMessageDatabase").Bool()
+		utils.PanicOnErr(err, "Invalid useMessageDatabase: %v", err, true)
 
 		srv.setTdOptions()
 
@@ -565,20 +565,20 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 			utils.MakeObject(
 				"setTdlibParameters",
 				utils.Params{
-					"use_test_dc":            use_test_dc,
-					"api_id":                 srv_config.Key("api_id").String(),
-					"api_hash":               srv_config.Key("api_hash").String(),
-					"device_model":           runtime.Version() + " " + runtime.GOARCH,
-					"use_file_database":      use_file_database,
-					"use_chat_info_database": use_chat_info_database,
-					"use_message_database":   use_message_database,
-					"files_directory":        srv_config.Key("files_directory").String(),
+					"useTestDC":           useTestDC,
+					"api_id":              srvConfig.Key("api_id").String(),
+					"api_hash":            srvConfig.Key("api_hash").String(),
+					"device_model":        runtime.Version() + " " + runtime.GOARCH,
+					"useFileDatabase":     useFileDatabase,
+					"useChatInfoDatabase": useChatInfoDatabase,
+					"useMessageDatabase":  useMessageDatabase,
+					"files_directory":     srvConfig.Key("files_directory").String(),
 					"database_directory": filepath.Join(
-						srv_config.Key("files_directory").String(), "database",
+						srvConfig.Key("files_directory").String(), "database",
 					),
-					"system_language_code": srv_config.Key("system_language_code").String(),
+					"system_language_code": srvConfig.Key("system_language_code").String(),
 					"database_encryption_key": base64.StdEncoding.EncodeToString([]byte(
-						srv_config.Key("database_encryption_key").String(),
+						srvConfig.Key("database_encryption_key").String(),
 					)),
 					"application_version": AppName + " v" + Version,
 				},
@@ -737,8 +737,8 @@ func (srv *Server) requestsListener() {
 	}
 }
 
-func (srv *Server) sendError(routing_key string, code int, message string, extra Data) {
-	srv.sendResponse(routing_key, utils.MakeObject("error", utils.Params{
+func (srv *Server) sendError(routingKey string, code int, message string, extra Data) {
+	srv.sendResponse(routingKey, utils.MakeObject("error", utils.Params{
 		"code":       code,
 		"message":    message,
 		"@extra":     extra,
