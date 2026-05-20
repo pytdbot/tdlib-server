@@ -110,7 +110,7 @@ func runServer(c *cli.Context) error {
 	return nil
 }
 
-func registerSignalHandler(server *srv.Server, notifyChannel chan struct{}) {
+func registerSignalHandler(server *srv.Server, notifyChannel chan<- struct{}) {
 	sigChannel := make(chan os.Signal, 1)
 	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM, syscall.SIGABRT, syscall.SIGSEGV)
 

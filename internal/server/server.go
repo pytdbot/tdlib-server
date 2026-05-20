@@ -683,7 +683,14 @@ func (srv *Server) tdListener() {
 			srv.processUpdate(update)
 		} else {
 
-			go srv.processUpdate(update)
+			go func(update Data) {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Printf("panic in processUpdate: %v\n", r)
+					}
+				}()
+				srv.processUpdate(update)
+			}(update)
 
 		}
 	}
