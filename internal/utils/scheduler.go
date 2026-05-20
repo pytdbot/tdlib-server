@@ -160,7 +160,14 @@ func (sched *Scheduler) loop() {
 				}
 
 				toDelete = append(toDelete, event_id)
-				go sched.event_callback(name, event_id, payload)
+				go func(name string, event_id int64, payload string) {
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Printf("panic in scheduler callback: %v\n", r)
+						}
+					}()
+					sched.event_callback(name, event_id, payload)
+				}(name, event_id, payload)
 			}
 			rows.Close()
 
@@ -171,9 +178,13 @@ func (sched *Scheduler) loop() {
 				}
 
 				for _, id := range toDelete {
-					tx.Stmt(deleteStmt).Exec(id)
+					if _, err := tx.Stmt(deleteStmt).Exec(id); err != nil {
+						fmt.Printf("scheduler: failed to delete event %d: %v\n", id, err)
+					}
 				}
-				tx.Commit()
+				if err := tx.Commit(); err != nil {
+					fmt.Printf("scheduler: failed to commit deletions: %v\n", err)
+				}
 			}
 
 		case <-sched.stopChan:
