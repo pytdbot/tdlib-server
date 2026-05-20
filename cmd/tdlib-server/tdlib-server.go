@@ -5,11 +5,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 
 	srv "github.com/pytdbot/tdlib-server/internal/server"
@@ -154,7 +155,7 @@ func updateServer(c *cli.Context) error {
 		return fmt.Errorf("failed to check for updates: HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
 		return fmt.Errorf("failed to read update response: %v", err)
 	}
@@ -181,6 +182,11 @@ func updateServer(c *cli.Context) error {
 
 	if downloadURL == "" {
 		return fmt.Errorf("no compatible binary found for your system (%s-%s)", runtime.GOOS, runtime.GOARCH)
+	}
+
+	parsedURL, err := url.Parse(downloadURL)
+	if err != nil || parsedURL.Scheme != "https" || !strings.HasSuffix(parsedURL.Host, "github.com") && !strings.HasSuffix(parsedURL.Host, "githubusercontent.com") {
+		return fmt.Errorf("untrusted download URL: %s", downloadURL)
 	}
 
 	if currentHash == upstreamHash {
@@ -214,7 +220,7 @@ func updateServer(c *cli.Context) error {
 
 	reader := bar.NewProxyReader(resp.Body)
 
-	_, err = io.Copy(out, reader)
+	_, err = io.Copy(out, io.LimitReader(reader, fileSize+1024))
 	if err != nil {
 		return fmt.Errorf("failed to write update file: %v", err)
 	}
