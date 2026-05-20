@@ -65,6 +65,12 @@ type Server struct {
 	uptime         time.Time
 
 	closeTimeout time.Duration
+
+	databaseDirectory string
+
+	listenerDone chan struct{}
+
+	publishDropped atomic.Int64
 }
 
 // New creates and initializes a new Server instance with the specified verbosity level
@@ -103,6 +109,8 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 
 	td := tdjson.NewTdJson(true, td_verbosity_level, log_file)
 
+	databaseDirectory := filepath.Join(cfg.Section("server").Key("files_directory").String(), "database")
+
 	tdRequestsInitValue := utils.UnsafeUnmarshal(td.Execute(utils.UnsafeMarshal(
 		utils.MakeObject(
 			"getLogTagVerbosityLevel",
@@ -111,9 +119,6 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 			},
 		),
 	)))
-	if tdRequestsInitValue == nil {
-		utils.PanicOnErr(false, "Failed to get td_requests log tag verbosity level", nil, true)
-	}
 
 	return &Server{
 		config:    cfg,
@@ -134,6 +139,8 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		waitForClosed:       make(chan struct{}),
 		broadcast_types:     mapOfTypes,
 		closeTimeout:        time.Duration(closeTimeoutSeconds) * time.Second,
+		databaseDirectory:   databaseDirectory,
+		listenerDone:        make(chan struct{}),
 	}, nil
 }
 
@@ -172,6 +179,8 @@ func (srv *Server) Close() (bool, error) {
 	}
 
 	srv.setIsRunning(false)
+	<-srv.listenerDone
+
 	srv.results.Clear()
 
 	srv.scheduler.Close()
@@ -194,11 +203,10 @@ func (srv *Server) Close() (bool, error) {
 }
 
 func (srv *Server) Start() {
-	srv.uptime = time.Now()
 	srv.startNATS()
-	srv.scheduler = utils.NewScheduler(filepath.Join(
-		srv.config.Section("server").Key("files_directory").String(), "database",
-	), srv.sendScheduledEvent)
+
+	srv.uptime = time.Now()
+	srv.scheduler = utils.NewScheduler(srv.databaseDirectory, srv.sendScheduledEvent)
 	srv.scheduler.Start()
 
 	go srv.Invoke(utils.MakeObject("getOption", utils.Params{"name": "version"}))
@@ -234,8 +242,7 @@ func (srv *Server) Options() Data {
 func (srv *Server) Invoke(request Data) (Data, bool) {
 	request_id := strconv.FormatInt(srv.requestID.GenerateID(), 10)
 
-	request["@extra"] = make(Data)
-	request["@extra"].(Data)["request_id"] = request_id
+	request["@extra"] = Data{"request_id": request_id}
 
 	channel := srv.results.Make(request_id)
 
@@ -311,7 +318,7 @@ func (srv *Server) processRequest(r *nats.Msg) {
 		return // invalid request
 	}
 
-	request, err := utils.Unmarshal(string(r.Data))
+	request, err := utils.UnmarshalBytes(r.Data)
 	if err != nil {
 		return
 	}
@@ -321,19 +328,23 @@ func (srv *Server) processRequest(r *nats.Msg) {
 		return
 	}
 
-	switch strings.ToLower(utils.Type(request)) {
+	switch utils.Type(request) {
 	case "close":
 		srv.handleCloseRequest(r, extra) // ignore close requests; returns OK immediately
-	case "getcurrentstate":
+	case "getCurrentState":
 		srv.handleGetCurrentStateRequest(r, extra)
-	case "getserverstats":
+	case "getServerStats":
 		srv.handleGetServerStatsRequest(r, extra)
-	case "scheduleevent":
+	case "scheduleEvent":
 		srv.handleScheduleEventRequest(r, request, extra)
-	case "cancelscheduledevent":
+	case "cancelScheduledEvent":
 		srv.handleCancelScheduledEventRequest(r, request, extra)
 	default:
-		<-srv.waitForReady
+		select {
+		case <-srv.waitForReady:
+		case <-srv.waitForClosed:
+			return
+		}
 		extra["routing_key"] = r.Reply
 		srv.send(request)
 	}
@@ -397,7 +408,11 @@ func (srv *Server) handleScheduleEventRequest(r *nats.Msg, request Data, extra D
 		name, _ = n.(string)
 	}
 
-	<-srv.waitForReady
+	select {
+	case <-srv.waitForReady:
+	case <-srv.waitForClosed:
+		return
+	}
 	eventID, err := srv.scheduler.CreateEvent(name, sendAt, payload)
 	if err != nil {
 		srv.sendError(r.Reply, 500, "Could not create scheduled event: "+err.Error(), extra)
@@ -445,7 +460,11 @@ func (srv *Server) handleCancelScheduledEventRequest(r *nats.Msg, request Data, 
 }
 
 func (srv *Server) sendScheduledEvent(name string, event_id int64, payload string) {
-	<-srv.waitForReady
+	select {
+	case <-srv.waitForReady:
+	case <-srv.waitForClosed:
+		return
+	}
 
 	srv.sendUpdate(utils.MakeObject("updateScheduledEvent", utils.Params{
 		"name":       name,
@@ -456,28 +475,23 @@ func (srv *Server) sendScheduledEvent(name string, event_id int64, payload strin
 }
 
 func (srv *Server) getCurrentState() Data {
-	srv.stateMu.RLock()
-	defer srv.stateMu.RUnlock()
-
-	updates := Data{
-		"@type":   "updates",
-		"updates": make([]Data, 0, len(srv.options)+2), // 2+ -> authorizationState + connectionState
-	}
+	updateSlice := make([]Data, 0, len(srv.options)+2) // 2+ -> authorizationState + connectionState
 
 	for k, v := range srv.options {
-		update := Data{
+		updateSlice = append(updateSlice, Data{
 			"@type":      "updateOption",
 			"name":       k,
 			"value":      v,
 			"@client_id": srv.td.ClientID,
-		}
-		updates["updates"] = append(updates["updates"].([]Data), update)
+		})
 	}
 
-	updates["updates"] = append(updates["updates"].([]Data), srv.authState)
-
-	updates["updates"] = append(updates["updates"].([]Data), srv.connectionState)
-	return updates
+	updateSlice = append(updateSlice, srv.authState, srv.connectionState)
+	return Data{
+		"@type":      "updates",
+		"updates":    updateSlice,
+		"@client_id": srv.td.ClientID,
+	}
 }
 
 func (srv *Server) getStats() Data {
@@ -580,10 +594,8 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 					"use_chat_info_database": use_chat_info_database,
 					"use_message_database":   use_message_database,
 					"files_directory":        srv_config.Key("files_directory").String(),
-					"database_directory": filepath.Join(
-						srv_config.Key("files_directory").String(), "database",
-					),
-					"system_language_code": srv_config.Key("system_language_code").String(),
+					"database_directory":     srv.databaseDirectory,
+					"system_language_code":   srv_config.Key("system_language_code").String(),
 					"database_encryption_key": base64.StdEncoding.EncodeToString([]byte(
 						srv_config.Key("database_encryption_key").String(),
 					)),
@@ -655,16 +667,13 @@ func (srv *Server) setTdOptions() {
 		var optionType string
 		var value interface{}
 
-		switch {
-		case utils.IsBool(val):
+		if boolVal, err := strconv.ParseBool(val); err == nil {
 			optionType = "optionValueBoolean"
-			boolVal, _ := strconv.ParseBool(val)
 			value = boolVal
-		case utils.IsInt(val):
+		} else if intVal, err := strconv.ParseInt(val, 10, 64); err == nil {
 			optionType = "optionValueInteger"
-			intVal, _ := strconv.ParseInt(val, 10, 64)
 			value = intVal
-		default:
+		} else {
 			optionType = "optionValueString"
 			value = val
 		}
@@ -679,7 +688,10 @@ func (srv *Server) setTdOptions() {
 
 func (srv *Server) tdListener() {
 	srv.setIsRunning(true)
-	defer srv.setIsRunning(false)
+	defer func() {
+		srv.setIsRunning(false)
+		close(srv.listenerDone)
+	}()
 
 	for srv.isRunning.Load() {
 		res := srv.td.Receive(1000.0)
@@ -689,13 +701,7 @@ func (srv *Server) tdListener() {
 
 		update := utils.UnsafeUnmarshal(res)
 
-		if _, isResponse := update["@extra"]; isResponse {
-			srv.processUpdate(update)
-		} else {
-
-			go srv.processUpdate(update)
-
-		}
+		go srv.processUpdate(update)
 	}
 }
 
@@ -758,7 +764,7 @@ func (srv *Server) sendResponse(reply string, update Data) {
 		return
 	}
 
-	body := []byte(utils.UnsafeMarshal(update))
+	body := utils.UnsafeMarshalBytes(update)
 
 	err := srv.natsConn.Publish(reply, body)
 
@@ -773,7 +779,7 @@ func (srv *Server) sendUpdate(update Data) {
 		return
 	}
 
-	body := []byte(utils.UnsafeMarshal(update))
+	body := utils.UnsafeMarshalBytes(update)
 
 	err := srv.natsConn.Publish(
 		srv.updatesSubject,
@@ -791,7 +797,7 @@ func (srv *Server) broadcast(update Data) {
 		return
 	}
 
-	body := []byte(utils.UnsafeMarshal(update))
+	body := utils.UnsafeMarshalBytes(update)
 
 	err := srv.natsConn.Publish(
 		srv.broadcastSubject,
