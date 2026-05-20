@@ -97,12 +97,6 @@ func runServer(c *cli.Context) error {
 		return err
 	}
 
-	// if c.IsSet("enable-requests-debug") {
-	// 	server.EnableRequestsDebug(c.Int("td-verbosity-level"))
-	// } else {
-	// 	server.DisableRequestsDebug()
-	// }
-
 	idle := make(chan struct{})
 	server.Start()
 	registerSignalHandler(server, idle)

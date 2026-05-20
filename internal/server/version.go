@@ -23,13 +23,13 @@ func init() {
 		),
 	)))
 
-	currant_version, _ := semver.NewVersion(res_version["value"].(string))
+	current_version, _ := semver.NewVersion(res_version["value"].(string))
 
 	minimum_version, _ := semver.NewVersion(MINIMUM_TDLIB_VERSION)
 
-	if currant_version.LessThan(minimum_version) {
+	if current_version.LessThan(minimum_version) {
 		utils.PanicOnErr(false, "Current TDLib version is too old. The minimum TDLib version is v%v", MINIMUM_TDLIB_VERSION, true)
 	}
 
-	TDLIB_VERSION = currant_version.Original()
+	TDLIB_VERSION = current_version.Original()
 }

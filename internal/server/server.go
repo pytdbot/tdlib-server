@@ -48,6 +48,7 @@ type Server struct {
 	waitForClosed chan struct{}
 
 	natsConn *nats.Conn
+	natsSub  *nats.Subscription
 
 	updatesSubject   string
 	requestsSubject  string
@@ -172,6 +173,10 @@ func (srv *Server) Close() (bool, error) {
 	srv.scheduler.Close()
 
 	if srv.natsConn != nil {
+		if srv.natsSub != nil {
+			srv.natsSub.Unsubscribe()
+		}
+
 		err := srv.natsConn.Drain()
 
 		if err != nil {
@@ -724,7 +729,7 @@ func (srv *Server) startNATS() {
 }
 
 func (srv *Server) requestsListener() {
-	_, err := srv.natsConn.Subscribe(
+	sub, err := srv.natsConn.Subscribe(
 		srv.requestsSubject,
 		func(msg *nats.Msg) {
 			go srv.processRequest(msg)
@@ -735,6 +740,8 @@ func (srv *Server) requestsListener() {
 		fmt.Printf("Could not subscribe to requests: %v\n", err)
 		return
 	}
+
+	srv.natsSub = sub
 }
 
 func (srv *Server) sendError(routing_key string, code int, message string, extra Data) {
