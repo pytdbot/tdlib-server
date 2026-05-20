@@ -17,23 +17,23 @@ func NewSafeResultsMap() *SafeResultsMap {
 }
 
 // Make creates and returns a new buffered channel for the specified key.
-func (srm *SafeResultsMap) Make(key string) chan map[string]interface{} {
-	srm.mu.Lock()
-	defer srm.mu.Unlock()
+func (m *SafeResultsMap) Make(key string) chan map[string]interface{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	channel := make(chan map[string]interface{}, 1)
 
-	srm.data[key] = channel
+	m.data[key] = channel
 
 	return channel
 }
 
 // Get retrieves the channel for the specified key.
-func (srm *SafeResultsMap) Get(key string) (chan map[string]interface{}, bool) {
-	srm.mu.RLock()
-	defer srm.mu.RUnlock()
+func (m *SafeResultsMap) Get(key string) (chan map[string]interface{}, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	val, ok := srm.data[key]
+	val, ok := m.data[key]
 
 	return val, ok
 }
@@ -42,11 +42,11 @@ func (srm *SafeResultsMap) Get(key string) (chan map[string]interface{}, bool) {
 //
 // The channel itself is not closed because request/reply
 // channels are single-use and owned by the waiting goroutine.
-func (srm *SafeResultsMap) Delete(key string) {
-	srm.mu.Lock()
-	defer srm.mu.Unlock()
+func (m *SafeResultsMap) Delete(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	delete(srm.data, key)
+	delete(m.data, key)
 }
 
 // SafeSend safely sends TDLib object to the channel without blocking.
@@ -55,7 +55,7 @@ func (srm *SafeResultsMap) Delete(key string) {
 // this operation is safe and efficient under concurrent workloads.
 //
 // If the channel buffer is already full, the value is discarded.
-func (srm *SafeResultsMap) SafeSend(
+func (m *SafeResultsMap) SafeSend(
 	ch chan<- map[string]interface{},
 	value map[string]interface{},
 ) {
@@ -69,17 +69,17 @@ func (srm *SafeResultsMap) SafeSend(
 //
 // Channels are not closed because request/reply
 // channels are single-use and owned by the waiting goroutine.
-func (srm *SafeResultsMap) Clear() {
-	srm.mu.Lock()
-	defer srm.mu.Unlock()
+func (m *SafeResultsMap) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	clear(srm.data)
+	clear(m.data)
 }
 
 // Len returns the number of active channels.
-func (srm *SafeResultsMap) Len() int {
-	srm.mu.RLock()
-	defer srm.mu.RUnlock()
+func (m *SafeResultsMap) Len() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	return len(srm.data)
+	return len(m.data)
 }

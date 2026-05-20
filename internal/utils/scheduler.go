@@ -13,24 +13,24 @@ import (
 )
 
 type Scheduler struct {
-	db     *sql.DB
-	db_dir string
+	db    *sql.DB
+	dbDir string
 
-	event_callback func(string, int64, string)
+	eventCallback func(string, int64, string)
 
-	create_stmt *sql.Stmt
-	stopChan    chan struct{}
-	mu          sync.Mutex
+	createStmt *sql.Stmt
+	stopChan   chan struct{}
+	mu         sync.Mutex
 }
 
-const db_version = 2
+const dbVersion = 2
 
 func (sched *Scheduler) Start() {
-	if err := os.MkdirAll(sched.db_dir, 0755); err != nil {
+	if err := os.MkdirAll(sched.dbDir, 0755); err != nil {
 		PanicOnErr(err, "Could not create database directory: %v", err, true)
 	}
 
-	db, err := sql.Open("sqlite3", "file:"+filepath.Join(sched.db_dir, "scheduler.db")+"?_journal_mode=WAL&_synchronous=1")
+	db, err := sql.Open("sqlite3", "file:"+filepath.Join(sched.dbDir, "scheduler.db")+"?_journal_mode=WAL&_synchronous=1")
 	PanicOnErr(err, "Could not open scheduler DB: %v", err, true)
 
 	sched.db = db
@@ -39,7 +39,7 @@ func (sched *Scheduler) Start() {
 
 	istmt, err := db.Prepare(`INSERT INTO scheduled_events (name, send_at, payload) VALUES (?, ?, ?)`)
 	PanicOnErr(err, "Failed to prepare insert statement: %v", err, true)
-	sched.create_stmt = istmt
+	sched.createStmt = istmt
 
 	go sched.loop()
 }
@@ -51,7 +51,7 @@ func (sched *Scheduler) CreateEvent(name string, sendAt int64, payload string) (
 
 	sched.mu.Lock()
 	defer sched.mu.Unlock()
-	res, err := sched.create_stmt.Exec(name, sendAt, payload)
+	res, err := sched.createStmt.Exec(name, sendAt, payload)
 	if err != nil {
 		return 0, err
 	}
@@ -82,7 +82,7 @@ func (sched *Scheduler) Close() error {
 
 	close(sched.stopChan)
 
-	sched.create_stmt.Close()
+	sched.createStmt.Close()
 	return sched.db.Close()
 }
 
@@ -91,14 +91,14 @@ func (sched *Scheduler) createTable() {
 	err := sched.db.QueryRow(`PRAGMA user_version;`).Scan(&version)
 	PanicOnErr(err, "Failed to read PRAGMA user_version: %v", err, true)
 
-	if version == db_version {
+	if version == dbVersion {
 		return
 	}
 
 	tx, err := sched.db.Begin()
 	PanicOnErr(err, "Failed to begin table transaction: %v", err, true)
 
-	for version < db_version {
+	for version < dbVersion {
 		switch version {
 		case 0:
 			_, err := tx.Exec(`
@@ -160,7 +160,7 @@ func (sched *Scheduler) loop() {
 				}
 
 				toDelete = append(toDelete, event_id)
-				go sched.event_callback(name, event_id, payload)
+				go sched.eventCallback(name, event_id, payload)
 			}
 			rows.Close()
 
@@ -182,10 +182,10 @@ func (sched *Scheduler) loop() {
 	}
 }
 
-func NewScheduler(db_dir string, event_callback func(string, int64, string)) *Scheduler {
+func NewScheduler(dbDir string, eventCallback func(string, int64, string)) *Scheduler {
 	return &Scheduler{
-		db_dir:         db_dir,
-		event_callback: event_callback,
-		stopChan:       make(chan struct{}),
+		dbDir:         dbDir,
+		eventCallback: eventCallback,
+		stopChan:      make(chan struct{}),
 	}
 }
