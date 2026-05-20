@@ -65,7 +65,6 @@ type Server struct {
 	closeTimeout time.Duration
 
 	databaseDirectory string
-	requestTimeout    time.Duration
 
 	listenerDone chan struct{}
 
@@ -139,7 +138,6 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		broadcast_types:     mapOfTypes,
 		closeTimeout:        time.Duration(closeTimeoutSeconds) * time.Second,
 		databaseDirectory:   databaseDirectory,
-		requestTimeout:      60 * time.Second,
 		listenerDone:        make(chan struct{}),
 	}, nil
 }
