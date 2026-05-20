@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -20,6 +21,13 @@ import (
 )
 
 type Data = map[string]interface{}
+
+func envOr(section *ini.Section, key, envVar string) string {
+	if v := os.Getenv(envVar); v != "" {
+		return v
+	}
+	return section.Key(key).String()
+}
 
 type PublishRequest struct {
 	exchange   string
@@ -82,6 +90,11 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		closeTimeoutSeconds = 0
 	}
 
+	filesDir := filepath.Clean(cfg.Section("server").Key("files_directory").String())
+	if filepath.IsAbs(filesDir) && !strings.HasPrefix(filesDir, "/tmp") && !strings.HasPrefix(filesDir, os.TempDir()) {
+		return nil, fmt.Errorf("files_directory must be relative or under a temp directory, got %s", filesDir)
+	}
+
 	listRaw := strings.Split(cfg.Section("server").Key("broadcast_types").String(), ",")
 
 	mapOfTypes := make(map[string]struct{})
@@ -91,7 +104,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		}
 	}
 
-	myID := utils.BotIDFromToken(cfg.Section("server").Key("bot_token").String())
+	myID := utils.BotIDFromToken(envOr(cfg.Section("server"), "bot_token", "BOT_TOKEN"))
 	if myID == "" {
 		return nil, fmt.Errorf("invalid bot token")
 	}
@@ -570,8 +583,8 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 				"setTdlibParameters",
 				utils.Params{
 					"use_test_dc":            use_test_dc,
-					"api_id":                 srv_config.Key("api_id").String(),
-					"api_hash":               srv_config.Key("api_hash").String(),
+					"api_id":                 envOr(srv_config, "api_id", "API_ID"),
+					"api_hash":               envOr(srv_config, "api_hash", "API_HASH"),
 					"device_model":           runtime.Version() + " " + runtime.GOARCH,
 					"use_file_database":      use_file_database,
 					"use_chat_info_database": use_chat_info_database,
@@ -582,7 +595,7 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 					),
 					"system_language_code": srv_config.Key("system_language_code").String(),
 					"database_encryption_key": base64.StdEncoding.EncodeToString([]byte(
-						srv_config.Key("database_encryption_key").String(),
+						envOr(srv_config, "database_encryption_key", "DB_ENCRYPTION_KEY"),
 					)),
 					"application_version": AppName + " v" + Version,
 				},
@@ -597,7 +610,7 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 			utils.MakeObject(
 				"checkAuthenticationBotToken",
 				utils.Params{
-					"token": srv.config.Section("server").Key("bot_token").String(),
+					"token": envOr(srv.config.Section("server"), "bot_token", "BOT_TOKEN"),
 				},
 			),
 		)
