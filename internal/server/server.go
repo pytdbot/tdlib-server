@@ -40,12 +40,14 @@ type Server struct {
 	myID                string
 	myIDInt             int64
 	tdRequestsInitValue int64
-	isAuthorized        bool
+	isAuthorized        atomic.Bool
 	isRunning           atomic.Bool
 	isDebug             bool
 
 	waitForReady  chan struct{}
 	waitForClosed chan struct{}
+	readyOnce     sync.Once
+	closedOnce    sync.Once
 
 	natsConn *nats.Conn
 
@@ -72,7 +74,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 	cfg, err := ini.Load(config_path)
 
 	if err != nil {
-		return nil, fmt.Errorf("fail to read configuration file "+config_path+": %v", err)
+		return nil, fmt.Errorf("fail to read configuration file %s: %v", config_path, err)
 	}
 
 	closeTimeoutSeconds, err := cfg.Section("server").Key("close_timeout").Int()
@@ -140,7 +142,7 @@ func (srv *Server) Close() (bool, error) {
 	res, ok := srv.Invoke(utils.MakeObject("close", utils.Params{}))
 
 	if !ok {
-		return false, fmt.Errorf(res["message"].(string))
+		return false, fmt.Errorf("%s", res["message"].(string))
 	}
 
 	var timeoutChannel <-chan time.Time
@@ -189,9 +191,8 @@ func (srv *Server) Close() (bool, error) {
 }
 
 func (srv *Server) Start() {
-	srv.startNATS()
-
 	srv.uptime = time.Now()
+	srv.startNATS()
 	srv.scheduler = utils.NewScheduler(filepath.Join(
 		srv.config.Section("server").Key("files_directory").String(), "database",
 	), srv.sendScheduledEvent)
@@ -452,6 +453,9 @@ func (srv *Server) sendScheduledEvent(name string, event_id int64, payload strin
 }
 
 func (srv *Server) getCurrentState() Data {
+	srv.stateMu.RLock()
+	defer srv.stateMu.RUnlock()
+
 	updates := Data{
 		"@type":   "updates",
 		"updates": make([]Data, 0, len(srv.options)+2), // 2+ -> authorizationState + connectionState
@@ -540,7 +544,7 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 	state := utils.Type(utils.AsMap(update["authorization_state"]))
 
 	if state == "authorizationStateReady" {
-		close(srv.waitForReady)
+		srv.readyOnce.Do(func() { close(srv.waitForReady) })
 	}
 
 	if state == "authorizationStateWaitTdlibParameters" {
@@ -602,17 +606,17 @@ func (srv *Server) handleUpdateAuthorizationState(update Data) {
 
 	} else if state == "authorizationStateReady" {
 
-		srv.isAuthorized = true
+		srv.isAuthorized.Store(true)
 
 	} else if state == "authorizationStateLoggingOut" ||
 		state == "authorizationStateClosing" {
 
-		srv.isAuthorized = false
+		srv.isAuthorized.Store(false)
 
 	} else if state == "authorizationStateClosed" {
 
-		srv.isAuthorized = false
-		close(srv.waitForClosed)
+		srv.isAuthorized.Store(false)
+		srv.closedOnce.Do(func() { close(srv.waitForClosed) })
 	}
 
 	srv.broadcast(update)
