@@ -137,27 +137,24 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 // It returns a boolean indicating whether the shutdown was successful and an error
 // if the shutdown fails.
 func (srv *Server) Close() (bool, error) {
-	res, ok := srv.Invoke(utils.MakeObject("close", utils.Params{}))
+	srv.send(utils.MakeObject("close", utils.Params{}))
 
-	if !ok {
-		return false, fmt.Errorf(res["message"].(string))
+	timeout := srv.closeTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
 	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
-	var timeoutChannel <-chan time.Time
-
-	if srv.closeTimeout > 0 {
-		timeoutChannel = time.After(srv.closeTimeout)
-	}
-
-	shouldPanic := false
+	shouldTimeout := false
 
 	select {
 	case <-srv.waitForClosed:
 		if srv.isDebug {
 			fmt.Println("TDLib closed gracefully.")
 		}
-	case <-timeoutChannel:
-		shouldPanic = true
+	case <-timer.C:
+		shouldTimeout = true
 
 		fmt.Println(
 			"Timeout waiting for TDLib authorizationStateClosed. Sending fake closed update.",
@@ -181,8 +178,8 @@ func (srv *Server) Close() (bool, error) {
 		srv.natsConn.Close()
 	}
 
-	if shouldPanic {
-		panic("TDLib did not close in time")
+	if shouldTimeout {
+		return false, fmt.Errorf("TDLib did not close in time")
 	}
 
 	return true, nil
