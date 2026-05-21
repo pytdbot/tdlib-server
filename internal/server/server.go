@@ -104,7 +104,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 
 	myIDInt, err := strconv.Atoi(myID)
 	if err != nil {
-		utils.PanicOnErr(false, "Could not convert bot ID to int", nil, true)
+		utils.PanicOnErr(err, "Could not convert bot ID to int: %v", err, true)
 	}
 
 	td := tdjson.NewTdJson(true, td_verbosity_level, log_file)

@@ -182,22 +182,29 @@ func (sched *Scheduler) loop() {
 				continue
 			}
 
-			var toDelete = make([]int64, 0, 100)
+			toDelete := make([]int64, 0, 100)
 
 			for rows.Next() {
 				var name string
-				var event_id int64
+				var eventID int64
 				var payload string
-				if err := rows.Scan(&name, &event_id, &payload); err != nil {
+
+				if err := rows.Scan(&name, &eventID, &payload); err != nil {
 					continue
 				}
 
-				toDelete = append(toDelete, event_id)
+				toDelete = append(toDelete, eventID)
+
 				sched.callbackSem <- struct{}{}
 				go func(n string, eid int64, p string) {
-					defer func() { <-sched.callbackSem }()
+					defer func() {
+						if r := recover(); r != nil {
+							fmt.Printf("panic in scheduler callback: %v\n", r)
+						}
+						<-sched.callbackSem
+					}()
 					sched.event_callback(n, eid, p)
-				}(name, event_id, payload)
+				}(name, eventID, payload)
 			}
 			rows.Close()
 
@@ -210,19 +217,21 @@ func (sched *Scheduler) loop() {
 				}
 
 				commitOK := true
+
 				for _, id := range toDelete {
 					if _, err := tx.Stmt(deleteStmt).Exec(id); err != nil {
 						fmt.Printf("Failed to delete scheduled event %d: %v\n", id, err)
 						commitOK = false
 					}
 				}
+
 				if commitOK {
 					if err := tx.Commit(); err != nil {
 						fmt.Printf("Failed to commit scheduled event deletions: %v\n", err)
-						tx.Rollback()
+						_ = tx.Rollback()
 					}
 				} else {
-					tx.Rollback()
+					_ = tx.Rollback()
 				}
 			}
 
