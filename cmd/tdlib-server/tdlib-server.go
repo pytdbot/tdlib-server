@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 
 	srv "github.com/pytdbot/tdlib-server/internal/server"
 	"github.com/pytdbot/tdlib-server/internal/utils"
@@ -129,9 +130,10 @@ type GitHubRelease struct {
 		Name               string `json:"name"`
 		BrowserDownloadURL string `json:"browser_download_url"`
 		Size               int64  `json:"size"`
-		Hash               string `json:"digest"`
 	} `json:"assets"`
 }
+
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 func updateServer(c *cli.Context) error {
 	execPath, err := os.Executable()
@@ -144,7 +146,7 @@ func updateServer(c *cli.Context) error {
 		return fmt.Errorf("failed to calculate current binary hash: %v", err)
 	}
 
-	resp, err := http.Get("https://api.github.com/repos/pytdbot/tdlib-server/releases/latest")
+	resp, err := httpClient.Get("https://api.github.com/repos/pytdbot/tdlib-server/releases/latest")
 	if err != nil {
 		return fmt.Errorf("failed to check for updates: %v", err)
 	}
@@ -165,17 +167,30 @@ func updateServer(c *cli.Context) error {
 	}
 
 	assetName := fmt.Sprintf("tdlib-server-%s-%s", runtime.GOOS, runtime.GOARCH)
+	hashAssetName := assetName + ".sha256"
 	var (
-		downloadURL  string
-		fileSize     int64
-		upstreamHash string
+		downloadURL   string
+		fileSize      int64
+		upstreamHash  string
+		hashAvailable bool
 	)
 	for _, asset := range release.Assets {
 		if asset.Name == assetName {
 			downloadURL = asset.BrowserDownloadURL
 			fileSize = asset.Size
-			upstreamHash = asset.Hash
-			break
+		} else if asset.Name == hashAssetName {
+			hResp, err := httpClient.Get(asset.BrowserDownloadURL)
+			if err == nil {
+				hashBody, err := io.ReadAll(io.LimitReader(hResp.Body, 128))
+				hResp.Body.Close()
+				if err == nil && len(hashBody) > 0 {
+					upstreamHash = string(hashBody)
+					if idx := len(upstreamHash); idx > 64 {
+						upstreamHash = upstreamHash[:64]
+					}
+					hashAvailable = true
+				}
+			}
 		}
 	}
 
@@ -183,7 +198,7 @@ func updateServer(c *cli.Context) error {
 		return fmt.Errorf("no compatible binary found for your system (%s-%s)", runtime.GOOS, runtime.GOARCH)
 	}
 
-	if currentHash == upstreamHash {
+	if hashAvailable && currentHash == upstreamHash {
 		fmt.Println("Already up-to-date")
 		return nil
 	}
@@ -192,7 +207,7 @@ func updateServer(c *cli.Context) error {
 	defer os.Remove(tempFile)
 
 	fmt.Printf("Downloading update from %s...\n", downloadURL)
-	resp, err = http.Get(downloadURL)
+	resp, err = httpClient.Get(downloadURL)
 	if err != nil {
 		return fmt.Errorf("failed to download update: %v", err)
 	}
@@ -226,7 +241,7 @@ func updateServer(c *cli.Context) error {
 		return fmt.Errorf("failed to verify downloaded update: %v", err)
 	}
 
-	if downloadedHash != upstreamHash {
+	if hashAvailable && downloadedHash != upstreamHash {
 		return fmt.Errorf("downloaded file hash does not match upstream hash: expected %s, got %s", upstreamHash, downloadedHash)
 	}
 

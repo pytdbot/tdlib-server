@@ -19,8 +19,12 @@ type Scheduler struct {
 	event_callback func(string, int64, string)
 
 	create_stmt *sql.Stmt
+	cancel_stmt *sql.Stmt
 	stopChan    chan struct{}
+	wakeChan    chan struct{}
+	callbackSem chan struct{}
 	mu          sync.Mutex
+	loopWg      sync.WaitGroup
 }
 
 const db_version = 2
@@ -34,6 +38,8 @@ func (sched *Scheduler) Start() {
 	PanicOnErr(err, "Could not open scheduler DB: %v", err, true)
 
 	sched.db = db
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 
 	sched.createTable()
 
@@ -41,6 +47,11 @@ func (sched *Scheduler) Start() {
 	PanicOnErr(err, "Failed to prepare insert statement: %v", err, true)
 	sched.create_stmt = istmt
 
+	cstmt, err := db.Prepare(`DELETE FROM scheduled_events WHERE event_id = ?`)
+	PanicOnErr(err, "Failed to prepare cancel statement: %v", err, true)
+	sched.cancel_stmt = cstmt
+
+	sched.loopWg.Add(1)
 	go sched.loop()
 }
 
@@ -56,6 +67,11 @@ func (sched *Scheduler) CreateEvent(name string, sendAt int64, payload string) (
 		return 0, err
 	}
 
+	select {
+	case sched.wakeChan <- struct{}{}:
+	default:
+	}
+
 	return res.LastInsertId()
 }
 
@@ -63,7 +79,7 @@ func (sched *Scheduler) CancelEvent(eventID int64) int64 {
 	sched.mu.Lock()
 	defer sched.mu.Unlock()
 
-	res, err := sched.db.Exec(`DELETE FROM scheduled_events WHERE event_id = ?`, eventID)
+	res, err := sched.cancel_stmt.Exec(eventID)
 	if err != nil {
 		return -1
 	}
@@ -80,9 +96,16 @@ func (sched *Scheduler) Close() error {
 	sched.mu.Lock()
 	defer sched.mu.Unlock()
 
+	select {
+	case <-sched.stopChan:
+	default:
+		close(sched.stopChan)
+	}
 	close(sched.stopChan)
+	sched.loopWg.Wait()
 
 	sched.create_stmt.Close()
+	sched.cancel_stmt.Close()
 	return sched.db.Close()
 }
 
@@ -127,65 +150,97 @@ func (sched *Scheduler) createTable() {
 }
 
 func (sched *Scheduler) loop() {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	defer sched.loopWg.Done()
 
 	selectStmt, err := sched.db.Prepare(`
 		SELECT name, event_id, payload FROM scheduled_events 
 		WHERE send_at <= ? 
 		ORDER BY send_at LIMIT 100`)
-	PanicOnErr(err, "Failed to prepare select statement: %v", err, true)
+	if err != nil {
+		fmt.Printf("Failed to prepare select statement: %v\n", err)
+		return
+	}
 	defer selectStmt.Close()
 
 	deleteStmt, err := sched.db.Prepare(`DELETE FROM scheduled_events WHERE event_id = ?`)
-	PanicOnErr(err, "Failed to prepare delete statement: %v", err, true)
+	if err != nil {
+		fmt.Printf("Failed to prepare delete statement: %v\n", err)
+		return
+	}
 	defer deleteStmt.Close()
+
+	ticker := time.NewTicker(sched.nextPollInterval())
+	defer ticker.Stop()
 
 	for {
 		select {
 		case now := <-ticker.C:
 			rows, err := selectStmt.Query(now.Unix())
 			if err != nil {
+				ticker.Stop()
+				ticker = time.NewTicker(sched.nextPollInterval())
 				continue
 			}
 
-			var toDelete []int64
+			toDelete := make([]int64, 0, 100)
 
 			for rows.Next() {
 				var name string
-				var event_id int64
+				var eventID int64
 				var payload string
-				if err := rows.Scan(&name, &event_id, &payload); err != nil {
+
+				if err := rows.Scan(&name, &eventID, &payload); err != nil {
 					continue
 				}
 
-				toDelete = append(toDelete, event_id)
-				go func(name string, event_id int64, payload string) {
+				toDelete = append(toDelete, eventID)
+
+				sched.callbackSem <- struct{}{}
+				go func(n string, eid int64, p string) {
 					defer func() {
 						if r := recover(); r != nil {
 							fmt.Printf("panic in scheduler callback: %v\n", r)
 						}
+						<-sched.callbackSem
 					}()
-					sched.event_callback(name, event_id, payload)
-				}(name, event_id, payload)
+					sched.event_callback(n, eid, p)
+				}(name, eventID, payload)
 			}
 			rows.Close()
 
 			if len(toDelete) > 0 {
 				tx, err := sched.db.Begin()
 				if err != nil {
+					ticker.Stop()
+					ticker = time.NewTicker(sched.nextPollInterval())
 					continue
 				}
 
+				commitOK := true
+
 				for _, id := range toDelete {
 					if _, err := tx.Stmt(deleteStmt).Exec(id); err != nil {
-						fmt.Printf("scheduler: failed to delete event %d: %v\n", id, err)
+						fmt.Printf("Failed to delete scheduled event %d: %v\n", id, err)
+						commitOK = false
 					}
 				}
-				if err := tx.Commit(); err != nil {
-					fmt.Printf("scheduler: failed to commit deletions: %v\n", err)
+
+				if commitOK {
+					if err := tx.Commit(); err != nil {
+						fmt.Printf("Failed to commit scheduled event deletions: %v\n", err)
+						_ = tx.Rollback()
+					}
+				} else {
+					_ = tx.Rollback()
 				}
 			}
+
+			ticker.Stop()
+			ticker = time.NewTicker(sched.nextPollInterval())
+
+		case <-sched.wakeChan:
+			ticker.Stop()
+			ticker = time.NewTicker(sched.nextPollInterval())
 
 		case <-sched.stopChan:
 			return
@@ -193,10 +248,30 @@ func (sched *Scheduler) loop() {
 	}
 }
 
+func (sched *Scheduler) nextPollInterval() time.Duration {
+	var nextSendAt sql.NullInt64
+	sched.db.QueryRow(`SELECT MIN(send_at) FROM scheduled_events`).Scan(&nextSendAt)
+
+	if !nextSendAt.Valid {
+		return 30 * time.Second
+	}
+
+	d := time.Duration(nextSendAt.Int64-time.Now().Unix()) * time.Second
+	if d < time.Second {
+		return time.Second
+	}
+	if d > 30*time.Second {
+		return 30 * time.Second
+	}
+	return d
+}
+
 func NewScheduler(db_dir string, event_callback func(string, int64, string)) *Scheduler {
 	return &Scheduler{
 		db_dir:         db_dir,
 		event_callback: event_callback,
 		stopChan:       make(chan struct{}),
+		wakeChan:       make(chan struct{}, 1),
+		callbackSem:    make(chan struct{}, 10),
 	}
 }
