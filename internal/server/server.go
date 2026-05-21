@@ -68,8 +68,6 @@ type Server struct {
 
 	databaseDirectory string
 
-	listenerDone chan struct{}
-
 	publishDropped atomic.Int64
 }
 
@@ -140,7 +138,6 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 		broadcast_types:     mapOfTypes,
 		closeTimeout:        time.Duration(closeTimeoutSeconds) * time.Second,
 		databaseDirectory:   databaseDirectory,
-		listenerDone:        make(chan struct{}),
 	}, nil
 }
 
@@ -179,7 +176,6 @@ func (srv *Server) Close() (bool, error) {
 	}
 
 	srv.setIsRunning(false)
-	<-srv.listenerDone
 
 	srv.results.Clear()
 
@@ -688,10 +684,7 @@ func (srv *Server) setTdOptions() {
 
 func (srv *Server) tdListener() {
 	srv.setIsRunning(true)
-	defer func() {
-		srv.setIsRunning(false)
-		close(srv.listenerDone)
-	}()
+	defer srv.setIsRunning(false)
 
 	for srv.isRunning.Load() {
 		res := srv.td.Receive(1000.0)
