@@ -1,29 +1,17 @@
 package utils
 
 import (
-	"sync"
+	"sync/atomic"
 )
 
-// IdGenerator is a thread-safe generator for unique request IDs.
 type IdGenerator struct {
-	currentRequestID int
-	mu               sync.Mutex
+	currentRequestID atomic.Int64
 }
 
-// NewIdGenerator creates and returns a new instance of IdGenerator,
 func NewIdGenerator() *IdGenerator {
-	return &IdGenerator{
-		currentRequestID: 0,
-	}
+	return &IdGenerator{}
 }
 
-// GenerateID increments the current request ID and returns the new value.
-//
-// This method is thread-safe.
-func (id *IdGenerator) GenerateID() int {
-	id.mu.Lock()
-	defer id.mu.Unlock()
-
-	id.currentRequestID++
-	return id.currentRequestID
+func (id *IdGenerator) GenerateID() int64 {
+	return id.currentRequestID.Add(1)
 }

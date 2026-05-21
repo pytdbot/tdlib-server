@@ -7,19 +7,21 @@ import (
 
 // BotIDFromToken extracts and returns the bot ID from the provided token string.
 //
-// If the token is longer than 80 characters or does not contain ':', it returns an empty string.
+// If the token is longer than 80 characters, does not contain ':',
+// the ID portion is empty, or the ID is not a valid integer, it returns an empty string.
 func BotIDFromToken(token string) string {
-	if len(token) > 80 || !strings.Contains(token, ":") {
+	if len(token) > 80 {
 		return ""
 	}
-
-	for x, char := range token {
-		if char == ':' {
-			return token[:x]
-		}
+	idx := strings.Index(token, ":")
+	if idx <= 0 {
+		return ""
 	}
-
-	return ""
+	id := token[:idx]
+	if _, err := strconv.Atoi(id); err != nil {
+		return ""
+	}
+	return id
 }
 
 // Check if a value can be parsed as an integer
