@@ -101,7 +101,7 @@ func (sched *Scheduler) Close() error {
 	default:
 		close(sched.stopChan)
 	}
-	close(sched.stopChan)
+
 	sched.loopWg.Wait()
 
 	sched.create_stmt.Close()
