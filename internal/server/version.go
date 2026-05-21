@@ -7,7 +7,7 @@ import (
 	"github.com/pytdbot/tdlib-server/internal/utils"
 )
 
-const Version = "0.2.0"
+const Version = "0.3.0"
 const AppName = "TDLib Server"
 const MINIMUM_TDLIB_VERSION = "1.8.6"
 
