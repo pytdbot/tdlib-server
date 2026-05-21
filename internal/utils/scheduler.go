@@ -93,6 +93,14 @@ func (sched *Scheduler) CancelEvent(eventID int64) int64 {
 }
 
 func (sched *Scheduler) Close() error {
+	sched.mu.Lock()
+	defer sched.mu.Unlock()
+
+	select {
+	case <-sched.stopChan:
+	default:
+		close(sched.stopChan)
+	}
 	close(sched.stopChan)
 	sched.loopWg.Wait()
 
