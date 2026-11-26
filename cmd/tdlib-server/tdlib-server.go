@@ -188,9 +188,6 @@ func updateServer(c *cli.Context) error {
 		return nil
 	}
 
-	tempFile := filepath.Join(os.TempDir(), "tdlib-server-update")
-	defer os.Remove(tempFile)
-
 	fmt.Printf("Downloading update from %s...\n", downloadURL)
 	resp, err = http.Get(downloadURL)
 	if err != nil {
@@ -202,40 +199,61 @@ func updateServer(c *cli.Context) error {
 		return fmt.Errorf("failed to download update: HTTP %d", resp.StatusCode)
 	}
 
-	out, err := os.OpenFile(tempFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
-	if err != nil {
-		return fmt.Errorf("failed to create temporary file: %v", err)
-	}
-	defer out.Close()
-
 	bar := pb.Full.Start64(fileSize)
 	bar.Set(pb.Bytes, true)
 	bar.SetWidth(80)
 
 	reader := bar.NewProxyReader(resp.Body)
 
-	_, err = io.Copy(out, reader)
-	if err != nil {
-		return fmt.Errorf("failed to write update file: %v", err)
+	if err := installUpdate(execPath, reader, upstreamHash); err != nil {
+		return err
 	}
 
 	bar.Finish()
 
-	downloadedHash, err := calculateFileSHA256(tempFile)
+	fmt.Printf("Successfully updated to %s version!\n", release.TagName)
+	return nil
+}
+
+// installUpdate replaces the binary at execPath with the contents of src, after
+// checking them against expectedHash.
+//
+// The download is written next to the binary, not into the system temp
+// directory: rename(2) cannot cross filesystems, and /tmp is often a separate
+// one (tmpfs, another partition, a container mount). The random name also
+// keeps other users from planting a file at a known path for a root run.
+func installUpdate(execPath string, src io.Reader, expectedHash string) error {
+	tempFile, err := os.CreateTemp(filepath.Dir(execPath), "."+filepath.Base(execPath)+"-update-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %v", err)
+	}
+	defer os.Remove(tempFile.Name()) // nothing left to remove once renamed
+
+	if _, err = io.Copy(tempFile, src); err != nil {
+		tempFile.Close()
+		return fmt.Errorf("failed to write update file: %v", err)
+	}
+	if err = tempFile.Close(); err != nil {
+		return fmt.Errorf("failed to write update file: %v", err)
+	}
+
+	if err = os.Chmod(tempFile.Name(), 0755); err != nil {
+		return fmt.Errorf("failed to make update executable: %v", err)
+	}
+
+	downloadedHash, err := calculateFileSHA256(tempFile.Name())
 	if err != nil {
 		return fmt.Errorf("failed to verify downloaded update: %v", err)
 	}
 
-	if downloadedHash != upstreamHash {
-		return fmt.Errorf("downloaded file hash does not match upstream hash: expected %s, got %s", upstreamHash, downloadedHash)
+	if downloadedHash != expectedHash {
+		return fmt.Errorf("downloaded file hash does not match upstream hash: expected %s, got %s", expectedHash, downloadedHash)
 	}
 
-	err = os.Rename(tempFile, execPath)
-	if err != nil {
+	if err = os.Rename(tempFile.Name(), execPath); err != nil {
 		return fmt.Errorf("failed to replace binary: %v", err)
 	}
 
-	fmt.Printf("Successfully updated to %s version!\n", release.TagName)
 	return nil
 }
 
