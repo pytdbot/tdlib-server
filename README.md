@@ -63,7 +63,7 @@ Follow these steps to set up and build **TDLib Server** on your system.
 
 ### Requirements
 
-- **Go >= 1.21**
+- **Go >= 1.27**
 - **[TDLib](https://github.com/tdlib/td#building)**
 - **[NATS Server](https://docs.nats.io/running-a-nats-service/introduction/installation)**
 
