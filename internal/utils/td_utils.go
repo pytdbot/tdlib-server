@@ -14,8 +14,8 @@ func MakeObject(requestType string, params Params) map[string]interface{} {
 //
 // If the "@type" field is missing, it returns an empty string.
 func Type(update map[string]interface{}) string {
-	if t, ok := update["@type"]; ok {
-		return t.(string)
+	if t, ok := update["@type"].(string); ok {
+		return t
 	}
 	return ""
 }

@@ -27,6 +27,12 @@ static: check_tdlib
 	CGO_CFLAGS=-I$(TD_INC) \
 	go build -o $(BIN) $(SRC)
 
+.PHONY: test
+test: check_tdlib
+	CGO_LDFLAGS="-L$(TD_LIB) -Wl,-rpath=$(TD_LIB) -ltdjson" \
+	CGO_CFLAGS=-I$(TD_INC) \
+	go test ./internal/...
+
 .PHONY: clean
 clean:
 	rm -rf ./bin
@@ -62,6 +68,7 @@ help:
 	@echo "Available commands:"
 	@echo "  make build     - Build the tdlib-server binary"
 	@echo "  make static    - Build the tdlib-server binary statically linked with TDLib"
+	@echo "  make test      - Run the tests"
 	@echo "  make clean     - Remove the built binary and clean up"
 	@echo "  make install   - Install tdlib-server system-wide"
 	@echo "  make uninstall - Uninstall tdlib-server system-wide"

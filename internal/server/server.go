@@ -30,6 +30,7 @@ type PublishRequest struct {
 type Server struct {
 	config    *ini.File
 	td        *tdjson.TdJson
+	tdSend    func(request string) // hands a request to TDLib; tests substitute it
 	requestID *utils.IdGenerator
 
 	authState       Data
@@ -49,13 +50,12 @@ type Server struct {
 	readyOnce     sync.Once
 	closedOnce    sync.Once
 
-	natsConn *nats.Conn
+	natsConn    *nats.Conn
+	natsPublish func(subject string, body []byte) error // sends to NATS; tests substitute it
 
 	updatesSubject   string
 	requestsSubject  string
 	broadcastSubject string
-
-	scheduler *utils.Scheduler
 
 	results         *utils.SafeResultsMap
 	broadcast_types map[string]struct{}
@@ -121,6 +121,7 @@ func New(td_verbosity_level int, config_path string, log_file string, debug bool
 	return &Server{
 		config:    cfg,
 		td:        td,
+		tdSend:    td.Send,
 		requestID: utils.NewIdGenerator(),
 		results:   utils.NewSafeResultsMap(),
 
@@ -179,8 +180,6 @@ func (srv *Server) Close() (bool, error) {
 
 	srv.results.Clear()
 
-	srv.scheduler.Close()
-
 	if srv.natsConn != nil {
 		err := srv.natsConn.Drain()
 
@@ -202,8 +201,6 @@ func (srv *Server) Start() {
 	srv.startNATS()
 
 	srv.uptime = time.Now()
-	srv.scheduler = utils.NewScheduler(srv.databaseDirectory, srv.sendScheduledEvent)
-	srv.scheduler.Start()
 
 	go srv.Invoke(utils.MakeObject("getOption", utils.Params{"name": "version"}))
 	go srv.tdListener()
@@ -231,6 +228,153 @@ func (srv *Server) Options() Data {
 	defer srv.stateMu.RUnlock()
 
 	return srv.options
+}
+
+// processUpdate handles an update or a response, still as the JSON TDLib
+// produced. Updates are relayed as those very bytes: nothing is decoded and
+// encoded again on the way to NATS. Only the kinds of update the server acts on,
+// and responses to the server's own requests, are decoded.
+func (srv *Server) processUpdate(raw []byte) {
+	if srv.isDebug {
+		fmt.Println("Received:", string(raw))
+	}
+
+	valStart, valEnd, isResponse, seen := locateExtra(raw)
+	if seen {
+		if !isResponse {
+			srv.processDecoded(utils.UnsafeUnmarshalBytes(raw)) // not TDLib's usual layout
+			return
+		}
+
+		srv.requests_count.Add(1) // it's a response
+
+		if reply, body, ok := stripRoutingKey(raw, valStart, valEnd); ok { // for a client
+			srv.publish(reply, body)
+			return
+		}
+		srv.deliverLocal(raw) // for an Invoke() of the server's own
+		return
+	}
+
+	srv.updates_count.Add(1) // it's an update
+
+	switch t := jsonType(raw); {
+	case eq(t, "updateOption"):
+		srv.handleUpdateOption(utils.UnsafeUnmarshalBytes(raw))
+	case eq(t, "updateAuthorizationState"):
+		// Blocks in Invoke() on a response only tdListener can receive.
+		go srv.handleUpdateAuthorizationState(utils.UnsafeUnmarshalBytes(raw))
+	case eq(t, "updateConnectionState"):
+		srv.handleUpdateConnectionState(utils.UnsafeUnmarshalBytes(raw))
+	case eq(t, "updateUser"):
+		subject := srv.updatesSubject
+		if id, ok := jsonNestedInt(raw, `"user"`, `"id"`); ok && id == srv.myIDInt {
+			subject = srv.broadcastSubject
+		}
+		srv.publish(subject, raw)
+	default:
+		if _, exists := srv.broadcast_types[string(t)]; exists {
+			srv.publish(srv.broadcastSubject, raw)
+		} else {
+			srv.publish(srv.updatesSubject, raw)
+		}
+	}
+}
+
+// processDecoded is processUpdate for a message that is already a Data, which
+// only messages in a layout TDLib does not usually produce still need.
+func (srv *Server) processDecoded(update Data) {
+	if srv.isDebug {
+		fmt.Println("Received:", utils.UnsafeMarshalWithIndent(update))
+	}
+
+	if extra, exists := update["@extra"]; exists { // it's a response
+		srv.requests_count.Add(1)
+
+		extraMap := utils.AsMap(extra)
+
+		if routingKey, ok := extraMap["routing_key"].(string); ok {
+			delete(extraMap, "routing_key")
+			srv.sendResponse(routingKey, update)
+		} else { // local request
+			if requestID, ok := extraMap["request_id"].(string); ok {
+				if channel, found := srv.results.Get(requestID); found {
+					srv.results.SafeSend(channel, update)
+					srv.results.Delete(requestID)
+				}
+			}
+		}
+	} else { // it's an update
+		srv.updates_count.Add(1)
+
+		update_type := utils.Type(update)
+
+		switch update_type {
+
+		case "updateOption":
+			srv.handleUpdateOption(update)
+		case "updateAuthorizationState":
+			// Blocks in Invoke() on a response only tdListener can receive.
+			go srv.handleUpdateAuthorizationState(update)
+		case "updateConnectionState":
+			srv.handleUpdateConnectionState(update)
+		case "updateUser":
+			srv.handleUpdateUser(update)
+		default:
+			if _, exists := srv.broadcast_types[update_type]; exists {
+				srv.broadcast(update)
+			} else {
+				srv.sendUpdate(update)
+			}
+		}
+	}
+}
+
+// deliverLocal hands a response to the Invoke() call waiting for it.
+func (srv *Server) deliverLocal(raw []byte) {
+	update := utils.UnsafeUnmarshalBytes(raw)
+
+	if requestID, ok := utils.AsMap(update["@extra"])["request_id"].(string); ok {
+		if channel, found := srv.results.Get(requestID); found {
+			srv.results.SafeSend(channel, update)
+			srv.results.Delete(requestID)
+		}
+	}
+}
+
+// forwardRequest hands a regular request to TDLib as the bytes the client sent,
+// with "routing_key" added to its "@extra", and reports true. It reports false
+// when the request is one the server answers itself or is too unusual to be
+// handled without decoding; such requests take the road they always did.
+func (srv *Server) forwardRequest(r *nats.Msg) bool {
+	extraStart, extraEnd, typ, hasExtra := scanRequest(r.Data)
+	switch {
+	case eq(typ, "close"), eq(typ, "getCurrentState"), eq(typ, "getServerStats"):
+		return false
+	case !hasExtra:
+		return false // not a well-formed object with "@extra": dropped below, as before
+	case r.Data[extraStart] != '{':
+		return true // "@extra" is not an object: ignored, as before
+	case !jsonSafe(r.Reply):
+		return false // needs escaping: let an encoder write it
+	}
+
+	select {
+	case <-srv.waitForReady:
+	case <-srv.waitForClosed:
+		return true
+	}
+
+	body, ok := spliceRoutingKey(r.Data, extraStart, extraEnd, r.Reply)
+	if !ok {
+		return false
+	}
+
+	srv.tdSend(bytesToString(body))
+	if srv.isDebug {
+		fmt.Println("Sent:", string(body))
+	}
+	return true
 }
 
 // Invoke sends a request to TDlib and returns the response data
@@ -262,56 +406,14 @@ func (srv *Server) Invoke(request Data) (Data, bool) {
 	}
 }
 
-func (srv *Server) processUpdate(update Data) {
-	if srv.isDebug {
-		fmt.Println("Received:", utils.UnsafeMarshalWithIndent(update))
-	}
-
-	if extra, exists := update["@extra"]; exists { // it's a response
-		srv.requests_count.Add(1)
-
-		extraMap := utils.AsMap(extra)
-
-		if routingKey, exists := extraMap["routing_key"]; exists {
-			delete(extraMap, "routing_key")
-			srv.sendResponse(routingKey.(string), update)
-		} else { // local request
-			if requestID, ok := extraMap["request_id"].(string); ok {
-				if channel, found := srv.results.Get(requestID); found {
-					srv.results.SafeSend(channel, update)
-					srv.results.Delete(requestID)
-				}
-			}
-		}
-	} else { // it's an update
-		srv.updates_count.Add(1)
-
-		update_type := utils.Type(update)
-
-		switch update_type {
-
-		case "updateOption":
-			srv.handleUpdateOption(update)
-		case "updateAuthorizationState":
-			srv.handleUpdateAuthorizationState(update)
-		case "updateConnectionState":
-			srv.handleUpdateConnectionState(update)
-		case "updateUser":
-			srv.handleUpdateUser(update)
-		default:
-			if _, exists := srv.broadcast_types[update_type]; exists {
-				srv.broadcast(update)
-			} else {
-				srv.sendUpdate(update)
-			}
-		}
-	}
-}
-
 func (srv *Server) processRequest(r *nats.Msg) {
 
 	if r.Reply == "" || !srv.isRunning.Load() {
 		return // invalid request
+	}
+
+	if srv.forwardRequest(r) {
+		return
 	}
 
 	request, err := utils.UnmarshalBytes(r.Data)
@@ -331,10 +433,6 @@ func (srv *Server) processRequest(r *nats.Msg) {
 		srv.handleGetCurrentStateRequest(r, extra)
 	case "getServerStats":
 		srv.handleGetServerStatsRequest(r, extra)
-	case "scheduleEvent":
-		srv.handleScheduleEventRequest(r, request, extra)
-	case "cancelScheduledEvent":
-		srv.handleCancelScheduledEventRequest(r, request, extra)
 	default:
 		select {
 		case <-srv.waitForReady:
@@ -362,112 +460,6 @@ func (srv *Server) handleGetServerStatsRequest(r *nats.Msg, extra Data) {
 	stats["@extra"] = extra
 	stats["@client_id"] = srv.td.ClientID
 	srv.sendResponse(r.Reply, stats)
-}
-
-func (srv *Server) handleScheduleEventRequest(r *nats.Msg, request Data, extra Data) {
-	sendAtValue, ok := request["send_at"]
-	if !ok {
-		srv.sendError(r.Reply, 400, "send_at is required", extra)
-		return
-	}
-
-	var sendAt int64
-	switch v := sendAtValue.(type) {
-	case int64:
-		sendAt = v
-	case float64:
-		sendAt = int64(v)
-	case int:
-		sendAt = int64(v)
-	default:
-		srv.sendError(r.Reply, 400, "send_at must be a number", extra)
-		return
-	}
-
-	if sendAt < time.Now().Unix() {
-		srv.sendError(r.Reply, 400, "send_at must be in the future", extra)
-		return
-	}
-
-	var payload string
-	if p, exists := request["payload"]; exists {
-		var ok bool
-		payload, ok = p.(string)
-		if !ok {
-			srv.sendError(r.Reply, 400, "payload must be a string", extra)
-			return
-		}
-	}
-
-	var name string
-	if n, exists := request["name"]; exists {
-		name, _ = n.(string)
-	}
-
-	select {
-	case <-srv.waitForReady:
-	case <-srv.waitForClosed:
-		return
-	}
-	eventID, err := srv.scheduler.CreateEvent(name, sendAt, payload)
-	if err != nil {
-		srv.sendError(r.Reply, 500, "Could not create scheduled event: "+err.Error(), extra)
-		return
-	}
-
-	srv.sendResponse(r.Reply, utils.MakeObject("scheduledEvent", utils.Params{
-		"event_id":   eventID,
-		"send_at":    sendAt,
-		"@extra":     extra,
-		"@client_id": srv.td.ClientID,
-	}))
-}
-
-func (srv *Server) handleCancelScheduledEventRequest(r *nats.Msg, request Data, extra Data) {
-	rawID, ok := request["event_id"]
-	if !ok {
-		srv.sendError(r.Reply, 400, "event_id is required", extra)
-		return
-	}
-
-	var eventID int64
-	switch v := rawID.(type) {
-	case float64:
-		eventID = int64(v)
-	case int:
-		eventID = int64(v)
-	case int64:
-		eventID = v
-	default:
-		srv.sendError(r.Reply, 400, "event_id must be an integer", extra)
-		return
-	}
-
-	code := srv.scheduler.CancelEvent(eventID)
-	if code == 0 {
-		srv.sendError(r.Reply, 400, "Event not found", extra)
-		return
-	}
-	if code < 0 {
-		srv.sendError(r.Reply, 500, "Failed to cancel event", extra)
-	}
-
-	srv.sendResponse(r.Reply, utils.MakeObject("ok", utils.Params{"@extra": extra, "@client_id": srv.td.ClientID}))
-}
-
-func (srv *Server) sendScheduledEvent(name string, event_id int64, payload string) {
-	select {
-	case <-srv.waitForReady:
-	case <-srv.waitForClosed:
-		return
-	}
-
-	srv.sendUpdate(utils.MakeObject("updateScheduledEvent", utils.Params{
-		"name":       name,
-		"event_id":   event_id,
-		"payload":    payload,
-		"@client_id": srv.td.ClientID,
-	}))
 }
 
 func (srv *Server) getCurrentState() Data {
@@ -533,7 +525,7 @@ func (srv *Server) DisableRequestsDebug() {
 }
 
 func (srv *Server) send(request Data) {
-	srv.td.Send(utils.UnsafeMarshal(request))
+	srv.tdSend(utils.UnsafeMarshal(request))
 	if srv.isDebug {
 		fmt.Println("Sent:", utils.UnsafeMarshalWithIndent(request))
 	}
@@ -642,15 +634,17 @@ func (srv *Server) handleUpdateConnectionState(connectionState Data) {
 }
 
 func (srv *Server) handleUpdateOption(option Data) {
-	srv.stateMu.Lock()
-	srv.options[option["name"].(string)] = option["value"]
-	srv.stateMu.Unlock()
+	if name, ok := option["name"].(string); ok {
+		srv.stateMu.Lock()
+		srv.options[name] = option["value"]
+		srv.stateMu.Unlock()
+	}
 
 	srv.broadcast(option)
 }
 
 func (srv *Server) handleUpdateUser(user Data) {
-	if utils.AsMap(user["user"])["id"].(int64) == srv.myIDInt {
+	if id, ok := utils.AsMap(user["user"])["id"].(int64); ok && id == srv.myIDInt {
 		srv.broadcast(user)
 	} else {
 		srv.sendUpdate(user)
@@ -682,19 +676,34 @@ func (srv *Server) setTdOptions() {
 	}
 }
 
+// updateQueueSize bounds how many messages may wait for NATS. A full queue
+// means TDLib is outpacing NATS, and receiving pauses until the backlog has
+// shrunk: back-pressure instead of memory growing without limit.
+const updateQueueSize = 1024
+
 func (srv *Server) tdListener() {
 	srv.setIsRunning(true)
 	defer srv.setIsRunning(false)
 
+	// One worker publishes what TDLib produced, in that order. Receiving is
+	// thereby never held up by a publish, and nothing piles up without bound,
+	// as a goroutine per message did. Messages stay the bytes TDLib produced:
+	// nothing is decoded and encoded again on the way to NATS.
+	queue := make(chan []byte, updateQueueSize)
+	defer close(queue)
+	go func() {
+		for raw := range queue {
+			srv.processUpdate(raw)
+		}
+	}()
+
 	for srv.isRunning.Load() {
-		res := srv.td.Receive(1000.0)
-		if res == "" {
+		raw := srv.td.ReceiveBytes(1000.0)
+		if len(raw) == 0 {
 			continue
 		}
 
-		update := utils.UnsafeUnmarshal(res)
-
-		go srv.processUpdate(update)
+		queue <- raw
 	}
 }
 
@@ -725,6 +734,7 @@ func (srv *Server) startNATS() {
 	utils.PanicOnErr(err, "Could not connect to NATS: %v", err, true)
 
 	srv.natsConn = nc
+	srv.natsPublish = nc.Publish
 
 	srv.requestsListener()
 }
@@ -753,51 +763,32 @@ func (srv *Server) sendError(routing_key string, code int, message string, extra
 }
 
 func (srv *Server) sendResponse(reply string, update Data) {
-	if !srv.IsRunning() {
-		return
-	}
-
-	body := utils.UnsafeMarshalBytes(update)
-
-	err := srv.natsConn.Publish(reply, body)
-
-	if err != nil {
-		fmt.Printf("Failed response publish: %v\n", err)
+	if srv.isRunning.Load() {
+		srv.publish(reply, utils.UnsafeMarshalBytes(update))
 	}
 }
 
 func (srv *Server) sendUpdate(update Data) {
 
-	if !srv.IsRunning() {
-		return
-	}
-
-	body := utils.UnsafeMarshalBytes(update)
-
-	err := srv.natsConn.Publish(
-		srv.updatesSubject,
-		body,
-	)
-
-	if err != nil {
-		fmt.Printf("Failed update publish: %v\n", err)
+	if srv.isRunning.Load() {
+		srv.publish(srv.updatesSubject, utils.UnsafeMarshalBytes(update))
 	}
 }
 
 func (srv *Server) broadcast(update Data) {
 
-	if !srv.IsRunning() {
+	if srv.isRunning.Load() {
+		srv.publish(srv.broadcastSubject, utils.UnsafeMarshalBytes(update))
+	}
+}
+
+// publish sends body to a NATS subject unchanged.
+func (srv *Server) publish(subject string, body []byte) {
+	if !srv.isRunning.Load() {
 		return
 	}
 
-	body := utils.UnsafeMarshalBytes(update)
-
-	err := srv.natsConn.Publish(
-		srv.broadcastSubject,
-		body,
-	)
-
-	if err != nil {
-		fmt.Printf("Failed broadcast publish: %v\n", err)
+	if err := srv.natsPublish(subject, body); err != nil {
+		fmt.Printf("Failed publish to %s: %v\n", subject, err)
 	}
 }
